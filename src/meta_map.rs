@@ -5,21 +5,26 @@ const TOMBSTONE: u8 = 0b0111_1111;
 const FULL_MASK: u8 = 0b1000_0000;
 
 fn full_entry(hash: u64) -> u8 {
-    (hash >> 58) as u8 ^ FULL_MASK
+    (hash >> 57) as u8 ^ FULL_MASK
 }
 
 pub struct MetaMap {
+    buckets: usize,
     bitvec: Vec<u8>,
 }
 
 impl MetaMap {
-    // Create a new meta-map. Buckets must be a multiple of 4096.
-    pub fn new(buckets: usize) -> Self {
-        assert_eq!(buckets % 4096, 0);
-
+    // Create a new meta-map from an existing vector.
+    pub fn from_bytes(meta_bytes: Vec<u8>, buckets: usize) -> Self {
+        assert_eq!(meta_bytes.len() % 4096, 0);
         MetaMap {
-            bitvec: vec![0u8; buckets],
+            buckets,
+            bitvec: meta_bytes
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.buckets
     }
 
     pub fn set_full(&mut self, bucket: usize, hash: u64) {

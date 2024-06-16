@@ -39,6 +39,7 @@ pub struct IoCommand {
     pub handle: HandleIndex,
     pub page_id: PageIndex,
     pub buf: Box<Page>,
+    pub user_data: u64,
 }
 
 pub struct CompleteIo {

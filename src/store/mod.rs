@@ -6,6 +6,8 @@ use std::{
     path::PathBuf,
 };
 
+use crate::meta_map::MetaMap;
+
 pub mod io;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -24,7 +26,7 @@ pub struct Store {
 impl Store {
     /// Create a new Store given the StoreOptions. Returns a handle to the store file plus the
     /// loaded meta-bits.
-    pub fn open(path: PathBuf) -> anyhow::Result<(Self, Vec<u8>)> {
+    pub fn open(path: PathBuf) -> anyhow::Result<(Self, MetaMap)> {
         let mut store_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -51,7 +53,7 @@ impl Store {
                 data_page_offset,
                 salt: meta_page.salt,
             },
-            meta_bytes,
+            MetaMap::new(meta_bytes),
         ))
     }
 
