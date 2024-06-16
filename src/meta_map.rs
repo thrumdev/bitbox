@@ -19,7 +19,7 @@ impl MetaMap {
         assert_eq!(meta_bytes.len() % 4096, 0);
         MetaMap {
             buckets,
-            bitvec: meta_bytes
+            bitvec: meta_bytes,
         }
     }
 

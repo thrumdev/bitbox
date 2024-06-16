@@ -19,8 +19,8 @@ pub struct Store {
     // the number of pages to add to a page number to find its real location in the file,
     // taking account of the meta page and meta byte pages.
     data_page_offset: u64,
-    // the salt for hashes in this store.
-    salt: [u8; 32],
+    // the seed for hashes in this store.
+    seed: [u8; 32],
 }
 
 impl Store {
@@ -51,12 +51,18 @@ impl Store {
             Store {
                 store_file,
                 data_page_offset,
-                salt: meta_page.salt,
+                seed: meta_page.seed,
             },
-            MetaMap::new(meta_bytes),
+            MetaMap::from_bytes(meta_bytes, meta_page.num_pages as usize),
         ))
     }
 
+    /// Get the hash seed.
+    pub fn seed(&self) -> [u8; 32] {
+        self.seed
+    }
+
+    /// Get the data page offset.
     pub fn data_page_offset(&self) -> u64 {
         self.data_page_offset
     }
@@ -74,7 +80,7 @@ pub struct MetaPage {
     // 4097x = 4096(y - 1) - 4095
     // x = ceil((4096/4097)(y-1) - (4095/4097))
     num_pages: u64,
-    salt: [u8; 32],
+    seed: [u8; 32],
 }
 
 impl MetaPage {
@@ -82,7 +88,7 @@ impl MetaPage {
         let mut page = [0u8; PAGE_SIZE];
         page[0..4].copy_from_slice(&self.version.to_le_bytes());
         page[4..12].copy_from_slice(&self.num_pages.to_le_bytes());
-        page[12..44].copy_from_slice(&self.salt);
+        page[12..44].copy_from_slice(&self.seed);
         page
     }
 
@@ -116,19 +122,19 @@ impl MetaPage {
             "Unsupported store version {}",
             version
         );
-        let mut salt = [0u8; 32];
-        salt.copy_from_slice(&page[12..44]);
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&page[12..44]);
         MetaPage {
             version,
             num_pages,
-            salt,
+            seed,
         }
     }
 }
 
 /// Creates the store file. Fails if store file already exists.
 ///
-/// Generates a random salt, lays out the meta page, and fills the file with zeroes.
+/// Generates a random seed, lays out the meta page, and fills the file with zeroes.
 pub fn create(path: PathBuf, num_pages: usize) -> std::io::Result<()> {
     const WRITE_BATCH_SIZE: usize = PAGE_SIZE; // 16MB
 
@@ -141,10 +147,10 @@ pub fn create(path: PathBuf, num_pages: usize) -> std::io::Result<()> {
     let meta_page = MetaPage {
         version: CURRENT_VERSION,
         num_pages: num_pages as u64,
-        salt: {
-            let mut salt = [0u8; 32];
-            rand::thread_rng().fill(&mut salt);
-            salt
+        seed: {
+            let mut seed = [0u8; 32];
+            rand::thread_rng().fill(&mut seed);
+            seed
         },
     };
 

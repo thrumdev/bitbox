@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod meta_map;
+mod sim;
 mod store;
 
 /// Simple program to greet a person

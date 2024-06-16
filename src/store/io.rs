@@ -39,6 +39,7 @@ pub struct IoCommand {
     pub handle: HandleIndex,
     pub page_id: PageIndex,
     pub buf: Box<Page>,
+    // note: this isn't passed to io_uring, it's higher-level userdata.
     pub user_data: u64,
 }
 
