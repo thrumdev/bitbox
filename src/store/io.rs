@@ -147,7 +147,11 @@ fn run_worker(
 
             let pending_index = pending.insert(next_io);
 
-            let entry = submission_entry(pending.get_mut(pending_index).unwrap(), &*store, pending_index);
+            let entry = submission_entry(
+                pending.get_mut(pending_index).unwrap(),
+                &*store,
+                pending_index,
+            );
             unsafe { submit_queue.push(&entry).unwrap() };
         }
 
@@ -161,11 +165,7 @@ fn run_worker(
     }
 }
 
-fn submission_entry(
-    command: &mut IoCommand,
-    store: &Store,
-    index: usize,
-) -> squeue::Entry {
+fn submission_entry(command: &mut IoCommand, store: &Store, index: usize) -> squeue::Entry {
     match command.kind {
         IoKind::Read(page_index, ref mut buf) => opcode::Read::new(
             types::Fd(store.store_file.as_raw_fd()),

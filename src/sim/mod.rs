@@ -124,12 +124,7 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
 
         let mut meta_map = meta_map.write().unwrap();
 
-        write(
-            io_handle_index,
-            &map,
-            &page_changes_rx,
-            &mut meta_map,
-        );
+        write(io_handle_index, &map, &page_changes_rx, &mut meta_map);
     }
 }
 
@@ -226,7 +221,13 @@ fn write(
         };
 
         submitted += 1;
-        submit_write(io_handle_index, &map.io_sender, &map.io_receiver, command, &mut completed);
+        submit_write(
+            io_handle_index,
+            &map.io_sender,
+            &map.io_receiver,
+            command,
+            &mut completed,
+        );
     }
 
     for changed_meta_page in changed_meta_pages {
@@ -239,7 +240,13 @@ fn write(
         };
 
         submitted += 1;
-        submit_write(io_handle_index, &map.io_sender, &map.io_receiver, command, &mut completed);
+        submit_write(
+            io_handle_index,
+            &map.io_sender,
+            &map.io_receiver,
+            command,
+            &mut completed,
+        );
     }
 
     while completed < submitted {
@@ -252,7 +259,13 @@ fn write(
         user_data: 0, // unimportant
     };
 
-    submit_write(io_handle_index, &map.io_sender, &map.io_receiver, command, &mut completed);
+    submit_write(
+        io_handle_index,
+        &map.io_sender,
+        &map.io_receiver,
+        command,
+        &mut completed,
+    );
     await_completion(&map.io_receiver, &mut completed);
 }
 
@@ -268,7 +281,9 @@ fn submit_write(
         match io_sender.try_send(c) {
             Ok(()) => break,
             Err(TrySendError::Disconnected(_)) => panic!("I/O worker dropped"),
-            Err(TrySendError::Full(c)) => { command = Some(c); }
+            Err(TrySendError::Full(c)) => {
+                command = Some(c);
+            }
         }
 
         await_completion(io_receiver, completed);
