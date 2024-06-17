@@ -23,12 +23,12 @@ use bitvec::prelude::*;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use rand::Rng;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
-    io::{self as store_io, CompleteIo, IoCommand, IoKind},
+    io::{self as store_io, CompleteIo, IoCommand, IoKind, PageIndex},
     Page, Store, PAGE_SIZE,
 };
 
@@ -108,6 +108,11 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
 
     let io_handle_index = params.num_workers;
 
+    let map = Map {
+        io_sender,
+        io_receiver: write_io_receiver,
+        hasher: make_hasher(store.seed()),
+    };
     loop {
         let barrier = Arc::new(Barrier::new(params.num_workers + 1));
         for tx in &start_work_txs {
@@ -118,9 +123,10 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         let _ = barrier.wait();
 
         let mut meta_map = meta_map.write().unwrap();
+
         write(
-            &io_sender,
-            &write_io_receiver,
+            io_handle_index,
+            &map,
             &page_changes_rx,
             &mut meta_map,
         );
@@ -192,10 +198,85 @@ impl Map {
 }
 
 fn write(
-    io_sender: &Sender<IoCommand>,
-    io_receiver: &Receiver<CompleteIo>,
+    io_handle_index: usize,
+    map: &Map,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
 ) {
-    // TODO
+    let mut changed_meta_pages = HashSet::new();
+
+    let mut submitted = 0;
+    let mut completed = 0;
+    for changed in changed_pages.try_iter() {
+        let bucket = match changed.bucket {
+            Some(b) => b,
+            None => {
+                let probe = map.begin_probe(&changed.page_id, &*meta_map);
+                let bucket = map.search_free(&*meta_map, probe);
+                changed_meta_pages.insert(meta_map.page_index(bucket as usize));
+                meta_map.set_full(bucket as usize, probe.hash);
+                bucket
+            }
+        };
+
+        let command = IoCommand {
+            kind: IoKind::Write(PageIndex::Data(bucket), changed.buf),
+            handle: io_handle_index,
+            user_data: 0, // unimportant.
+        };
+
+        submitted += 1;
+        submit_write(io_handle_index, &map.io_sender, &map.io_receiver, command, &mut completed);
+    }
+
+    for changed_meta_page in changed_meta_pages {
+        let mut buf = Box::new([0; 4096]);
+        buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
+        let command = IoCommand {
+            kind: IoKind::Write(PageIndex::MetaBytes(changed_meta_page as u64), buf),
+            handle: io_handle_index,
+            user_data: 0, // unimportant
+        };
+
+        submitted += 1;
+        submit_write(io_handle_index, &map.io_sender, &map.io_receiver, command, &mut completed);
+    }
+
+    while completed < submitted {
+        await_completion(&map.io_receiver, &mut completed);
+    }
+
+    let command = IoCommand {
+        kind: IoKind::Fsync,
+        handle: io_handle_index,
+        user_data: 0, // unimportant
+    };
+
+    submit_write(io_handle_index, &map.io_sender, &map.io_receiver, command, &mut completed);
+    await_completion(&map.io_receiver, &mut completed);
+}
+
+fn submit_write(
+    io_handle_index: usize,
+    io_sender: &Sender<IoCommand>,
+    io_receiver: &Receiver<CompleteIo>,
+    command: IoCommand,
+    completed: &mut usize,
+) {
+    let mut command = Some(command);
+    while let Some(c) = command.take() {
+        match io_sender.try_send(c) {
+            Ok(()) => break,
+            Err(TrySendError::Disconnected(_)) => panic!("I/O worker dropped"),
+            Err(TrySendError::Full(c)) => { command = Some(c); }
+        }
+
+        await_completion(io_receiver, completed);
+    }
+}
+
+fn await_completion(io_receiver: &Receiver<CompleteIo>, completed: &mut usize) {
+    let completion = io_receiver.recv().expect("I/O worker dropped");
+    assert!(completion.result.is_ok());
+    *completed += 1;
 }

@@ -11,10 +11,20 @@ const MAX_IN_FLIGHT: usize = 64;
 
 pub type HandleIndex = usize;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum IoKind {
-    Read,
-    Write,
+    Read(PageIndex, Box<Page>),
+    Write(PageIndex, Box<Page>),
+    Fsync,
+}
+
+impl IoKind {
+    pub fn unwrap_buf(self) -> Box<Page> {
+        match self {
+            IoKind::Read(_, buf) | IoKind::Write(_, buf) => buf,
+            IoKind::Fsync => panic!("attempted to extract buf from fsync"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -37,8 +47,6 @@ impl PageIndex {
 pub struct IoCommand {
     pub kind: IoKind,
     pub handle: HandleIndex,
-    pub page_id: PageIndex,
-    pub buf: Box<Page>,
     // note: this isn't passed to io_uring, it's higher-level userdata.
     pub user_data: u64,
 }
@@ -137,12 +145,9 @@ fn run_worker(
             };
             to_submit = true;
 
-            let page_id = next_io.page_id;
-            let kind = next_io.kind;
-            let buf_ptr = next_io.buf.as_mut_ptr();
             let pending_index = pending.insert(next_io);
 
-            let entry = submission_entry(buf_ptr, page_id, kind, &*store, pending_index);
+            let entry = submission_entry(pending.get_mut(pending_index).unwrap(), &*store, pending_index);
             unsafe { submit_queue.push(&entry).unwrap() };
         }
 
@@ -157,29 +162,27 @@ fn run_worker(
 }
 
 fn submission_entry(
-    buf_ptr: *mut u8,
-    page_index: PageIndex,
-    kind: IoKind,
+    command: &mut IoCommand,
     store: &Store,
     index: usize,
 ) -> squeue::Entry {
-    let page_offset = page_index.index_in_store(store) * PAGE_SIZE as u64;
-    match kind {
-        IoKind::Read => opcode::Read::new(
+    match command.kind {
+        IoKind::Read(page_index, ref mut buf) => opcode::Read::new(
             types::Fd(store.store_file.as_raw_fd()),
-            buf_ptr,
+            buf.as_mut_ptr(),
             PAGE_SIZE as u32,
         )
-        .offset(page_offset)
+        .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
         .build()
         .user_data(index as u64),
-        IoKind::Write => opcode::Write::new(
+        IoKind::Write(page_index, ref buf) => opcode::Write::new(
             types::Fd(store.store_file.as_raw_fd()),
-            buf_ptr as *const u8,
+            buf.as_ptr(),
             PAGE_SIZE as u32,
         )
-        .offset(page_offset)
+        .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
         .build()
         .user_data(index as u64),
+        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd())).build(),
     }
 }

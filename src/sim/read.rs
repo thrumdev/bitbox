@@ -255,10 +255,11 @@ fn handle_complete(
     };
 
     // check that page idx matches the fetched page.
-    *job.state_mut(index_in_job) = if page_id_matches(&*command.buf, &expected_id) {
+    let page = command.kind.unwrap_buf();
+    *job.state_mut(index_in_job) = if page_id_matches(&*page, &expected_id) {
         PageState::Received {
             location: Some(probe.bucket),
-            page: command.buf,
+            page,
         }
     } else {
         // probe failure. continue searching.
@@ -286,10 +287,8 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
     'a: for (job_idx, batch) in in_flight.iter_mut().enumerate() {
         while let Some((i, probe)) = batch.next_pending() {
             let command = IoCommand {
-                kind: IoKind::Read,
+                kind: IoKind::Read(PageIndex::Data(probe.bucket), Box::new([0; PAGE_SIZE])),
                 handle: io_handle_index,
-                page_id: PageIndex::Data(probe.bucket),
-                buf: Box::new([0; PAGE_SIZE]),
                 user_data: pack_user_data(job_idx - job_head, i),
             };
 
