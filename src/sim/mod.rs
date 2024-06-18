@@ -103,9 +103,12 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         let meta_map = meta_map.clone();
         let page_changes_tx = page_changes_tx.clone();
         let (start_work_tx, start_work_rx) = crossbeam_channel::bounded(1);
-        std::thread::spawn(move || {
-            read::run_worker(i, params, map, meta_map, page_changes_tx, start_work_rx)
-        });
+        let _ = std::thread::Builder::new()
+            .name("read_worker".to_string())
+            .spawn(move || {
+                read::run_worker(i, params, map, meta_map, page_changes_tx, start_work_rx)
+            })
+            .unwrap();
         start_work_txs.push(start_work_tx);
     }
 

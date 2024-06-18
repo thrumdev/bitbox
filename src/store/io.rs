@@ -67,7 +67,10 @@ pub fn start_io_worker(
     let (handle_txs, handle_rxs) = (0..num_handles)
         .map(|_| crossbeam_channel::unbounded())
         .unzip();
-    std::thread::spawn(move || run_worker(store, command_rx, handle_txs));
+    let _ = std::thread::Builder::new()
+        .name("io_worker".to_string())
+        .spawn(move || run_worker(store, command_rx, handle_txs))
+        .unwrap();
     (command_tx, handle_rxs)
 }
 
