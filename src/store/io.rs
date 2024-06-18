@@ -8,12 +8,13 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
-const RING_CAPACITY: u32 = 64;
+const RING_CAPACITY: u32 = 32;
 
 // max number of inflight requests is bounded by the slab.
-const MAX_IN_FLIGHT: usize = 64;
+const MAX_IN_FLIGHT: usize = 128;
 
 static IO_OPS: AtomicU64 = AtomicU64::new(0);
 
@@ -64,6 +65,11 @@ pub struct CompleteIo {
     pub result: std::io::Result<()>,
 }
 
+struct PendingIo {
+    command: IoCommand,
+    start: Instant,
+}
+
 pub fn total_io_ops() -> u64 {
     IO_OPS.load(Ordering::Relaxed)
 }
@@ -91,57 +97,99 @@ fn run_worker(
     command_rx: Receiver<IoCommand>,
     handle_tx: Vec<Sender<CompleteIo>>,
 ) {
-    let mut pending: Slab<IoCommand> = Slab::with_capacity(MAX_IN_FLIGHT);
+    let mut pending: Slab<PendingIo> = Slab::with_capacity(MAX_IN_FLIGHT);
 
     let mut ring = IoUring::<squeue::Entry, cqueue::Entry>::builder()
-        .setup_single_issuer()
         .build(RING_CAPACITY)
         .expect("Error building io_uring");
 
-    loop {
-        // note: dropping the queues at the end of loop iteration performs `sync` implicitly
-        let (submitter, mut submit_queue, mut complete_queue) = ring.split();
+    let (submitter, mut submit_queue, mut complete_queue) = ring.split();
 
+    const LOG_DURATION: Duration = Duration::from_millis(200);
+
+    let mut iter = 0;
+    let mut last_log = Instant::now();
+    let mut total_inflight_us = 0;
+    let mut total_syscall_ns = 0;
+    let mut total_complete_ns = 0;
+    let mut total_submit_ns = 0;
+    let mut completions = 0;
+    let mut arrivals = 0;
+    let mut empty_count = 0;
+    let mut full_count = 0;
+    loop {   
+        let elapsed = last_log.elapsed();
+        if elapsed > LOG_DURATION {
+            last_log = Instant::now();
+            let arrival_rate = arrivals as f64 * 1000.0 / elapsed.as_millis() as f64;
+            let average_inflight = total_inflight_us as f64 / completions as f64;
+            println!("full={full_count} empty={empty_count} iterations of {iter}");
+            println!("syscall_time={}ns completion_time={}ns submit_time={}ns", 
+                (total_syscall_ns as f64 / iter as f64) as usize,
+                (total_complete_ns as f64 / iter as f64) as usize,
+                (total_submit_ns as f64 / iter as f64) as usize,
+            );
+            println!("arrivals={} (rate {}/s) completions={} avg_inflight={}us | {}ms",
+                arrivals,
+                arrival_rate as usize,
+                completions,
+                average_inflight as usize,
+                elapsed.as_millis(),
+            );
+            println!("  estimated-QD={}", (arrival_rate * average_inflight / 1_000_000.0) as usize);
+
+            total_inflight_us = 0;
+            total_syscall_ns = 0;
+            total_complete_ns = 0;
+            total_submit_ns = 0;
+            completions = 0;
+            arrivals = 0;
+            full_count = 0;
+            empty_count = 0;
+            iter = 0;
+        }
+
+        iter += 1;
+        
         // 1. process completions.
+        let complete_start = Instant::now();
         if !pending.is_empty() {
-            // block on next completion if at capacity.
-            if pending.len() == MAX_IN_FLIGHT && complete_queue.is_empty() {
-                // hack: this is not exposed from the io_uring or libc libraries.
-                const IORING_ENTER_GETEVENTS: u32 = 1;
+            complete_queue.sync();
+            while let Some(completion_event) = complete_queue.next() {
+                let PendingIo {
+                    command,
+                    start,
+                } = pending.remove(completion_event.user_data() as usize);
 
-                // we just get events here, not submit.
-                // TODO: handle error
-                unsafe {
-                    submitter
-                        .enter::<libc::sigset_t>(
-                            0, // submit
-                            1, // complete
-                            IORING_ENTER_GETEVENTS,
-                            None,
-                        )
-                        .unwrap();
-                }
-                complete_queue.sync();
-            }
+                total_inflight_us += start.elapsed().as_micros();
+                completions += 1;
 
-            for completion_event in complete_queue {
-                let command = pending.remove(completion_event.user_data() as usize);
                 let handle_idx = command.handle;
                 let result = if completion_event.result() == -1 {
                     Err(std::io::Error::from_raw_os_error(completion_event.result()))
                 } else {
                     Ok(())
                 };
-                let complete = CompleteIo { command, result };
+                let complete = CompleteIo { command, result: Ok(()) };
                 if let Err(_) = handle_tx[handle_idx].send(complete) {
                     // TODO: handle?
                     break;
                 }
             }
         }
+        total_complete_ns += complete_start.elapsed().as_nanos();
 
         // 2. accept new I/O requests when slab has space & submission queue is not full.
         let mut to_submit = false;
+        let mut ios = 0;
+
+        let submit_start = Instant::now();
+        submit_queue.sync();
+        if pending.len() == MAX_IN_FLIGHT {
+            full_count += 1;
+        } else if pending.is_empty() {
+            empty_count += 1;
+        }
         while pending.len() < MAX_IN_FLIGHT && !submit_queue.is_full() {
             let next_io = if pending.is_empty() {
                 // block on new I/O if nothing in-flight.
@@ -156,30 +204,57 @@ fn run_worker(
                     Err(TryRecvError::Disconnected) => break, // TODO: wait on pending I/O?
                 }
             };
-            to_submit = true;
+            arrivals += 1;
 
-            let pending_index = pending.insert(next_io);
+            // uncomment to test what happens if we don't I/O
+            // {
+            //     let handle_idx = next_io.handle;
+            //     let complete = CompleteIo { command: next_io, result: Ok(()) };
+            //     if let Err(_) = handle_tx[handle_idx].send(complete) {
+            //         // TODO: handle?
+            //         break;
+            //     }
+
+            //     break
+            // }
+
+            to_submit = true;
+            let pending_index = pending.insert(PendingIo {
+                command: next_io,
+                start: Instant::now(),
+            });
 
             let entry = submission_entry(
-                pending.get_mut(pending_index).unwrap(),
+                &mut pending.get_mut(pending_index).unwrap().command,
                 &*store,
-                pending_index,
-            );
+            ).user_data(pending_index as u64);
+
+            // unwrap: known not full
             unsafe { submit_queue.push(&entry).unwrap() };
-            IO_OPS.fetch_add(1, Ordering::Relaxed);
+            ios += 1;
         }
 
         // 3. submit all together.
         if to_submit {
+            IO_OPS.fetch_add(ios, Ordering::Relaxed);
             submit_queue.sync();
-
-            // TODO: handle this error properly.
-            submitter.submit().unwrap();
         }
+
+        total_submit_ns += submit_start.elapsed().as_nanos();
+
+        let wait = if pending.len() == MAX_IN_FLIGHT {
+            1
+        } else {
+            0
+        };
+
+        let syscall_start = Instant::now();
+        submitter.submit_and_wait(wait).unwrap();
+        total_syscall_ns += syscall_start.elapsed().as_nanos();
     }
 }
 
-fn submission_entry(command: &mut IoCommand, store: &Store, index: usize) -> squeue::Entry {
+fn submission_entry(command: &mut IoCommand, store: &Store) -> squeue::Entry {
     match command.kind {
         IoKind::Read(page_index, ref mut buf) => opcode::Read::new(
             types::Fd(store.store_file.as_raw_fd()),
@@ -187,18 +262,15 @@ fn submission_entry(command: &mut IoCommand, store: &Store, index: usize) -> squ
             PAGE_SIZE as u32,
         )
         .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
-        .build()
-        .user_data(index as u64),
+        .build(),
         IoKind::Write(page_index, ref buf) => opcode::Write::new(
             types::Fd(store.store_file.as_raw_fd()),
             buf.as_ptr(),
             PAGE_SIZE as u32,
         )
         .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
-        .build()
-        .user_data(index as u64),
+        .build(),
         IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd()))
-            .build()
-            .user_data(index as u64),
+            .build(),
     }
 }
