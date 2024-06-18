@@ -185,13 +185,6 @@ fn read_phase(
             }
         }
 
-        // // block on completion if we can't make progress.
-        // if in_flight.front().map_or(false, |s| s.waiting_on_io()) {
-        //     let complete_io = map.io_receiver.recv().expect("I/O worker dropped");
-
-        //     handle_complete(complete_io, &mut in_flight, map, &*meta_map);
-        // }
-
         // process ready batches from the front.
         while in_flight.front().map_or(false, |state| state.all_ready()) {
             let mut item = in_flight.pop_front().unwrap();
