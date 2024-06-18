@@ -45,11 +45,15 @@ pub(crate) fn run_worker(
                 // turn each sample into a random hash, set a unique byte per worker to discriminate.
                 (0..params.preload_count + 1)
                     .map(move |_| rand::thread_rng().gen_range(range.clone()))
-                    .map(|sample| blake3::hash(sample.to_le_bytes().as_slice()))
+                    .map(|sample| {
+                        // partition the page set across workers so it's the same regardless
+                        // of num workers with no overlaps.
+                        let sample = sample * params.num_workers + worker_index;
+                        blake3::hash(sample.to_le_bytes().as_slice())
+                    })
                     .map(|hash| {
                         let mut page_id = [0; 16];
                         page_id.copy_from_slice(&hash.as_bytes()[..16]);
-                        page_id[15] = worker_index as u8;
                         page_id
                     })
             })
