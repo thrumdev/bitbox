@@ -17,7 +17,7 @@ pub enum IoKind {
     Write,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum PageIndex {
     Data(u64),
     MetaBytes(u64),
@@ -25,7 +25,7 @@ pub enum PageIndex {
 }
 
 impl PageIndex {
-    fn index_in_store(self, store: &Store) -> u64 {
+    pub(super) fn index_in_store(self, store: &Store) -> u64 {
         match self {
             PageIndex::Data(i) => store.data_page_offset() + i,
             PageIndex::MetaBytes(i) => 1 + i,

@@ -7,6 +7,8 @@ use std::{
 };
 
 pub mod io;
+#[cfg(test)]
+mod tests;
 
 pub const PAGE_SIZE: usize = 4096;
 pub type Page = [u8; PAGE_SIZE];
