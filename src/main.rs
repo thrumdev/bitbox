@@ -28,7 +28,7 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         num_readers: usize,
         #[arg(long)]
-        num_pages: usize,
+        pages_to_use: usize,
         #[arg(long)]
         workload_size: usize,
         #[arg(long, default_value_t = 0.0)]
@@ -55,7 +55,7 @@ fn main() {
         Command::Run {
             file,
             num_readers,
-            num_pages,
+            pages_to_use,
             workload_size,
             cold_rate,
             preload_count,
@@ -72,7 +72,7 @@ fn main() {
 
             let sim_params = sim::Params {
                 num_workers: num_readers,
-                num_pages,
+                num_pages: pages_to_use,
                 workload_size,
                 cold_rate,
                 preload_count,

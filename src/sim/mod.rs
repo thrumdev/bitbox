@@ -22,7 +22,10 @@ use ahash::RandomState;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use std::collections::HashSet;
-use std::sync::{Arc, Barrier, RwLock};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Barrier, RwLock,
+};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
@@ -58,7 +61,7 @@ const SLOTS_PER_PAGE: usize = 126;
 
 fn slot_range(slot_index: usize) -> std::ops::Range<usize> {
     let start = 32 + slot_index * 32;
-    let end = slot_index + 32;
+    let end = start + 32;
     start..end
 }
 
@@ -76,6 +79,8 @@ fn make_hasher(seed: [u8; 32]) -> RandomState {
         extract_u64(24..32),
     )
 }
+
+static IO_OPS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) {
     params.num_pages /= params.num_workers;
@@ -112,6 +117,11 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         hasher: make_hasher(store.seed()),
     };
     loop {
+        println!("starting read phase on {} workers", params.num_workers);
+
+        let mut start = std::time::Instant::now();
+        IO_OPS.store(0, Ordering::Release);
+
         let barrier = Arc::new(Barrier::new(params.num_workers + 1));
         for tx in &start_work_txs {
             let _ = tx.send(barrier.clone());
@@ -120,9 +130,30 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         // wait for reading to be done.
         let _ = barrier.wait();
 
+        let io_ops = IO_OPS.swap(0, Ordering::AcqRel);
+        // ms = s * 1000
+        // s = ms / 1000
+        // iops = ios / s
+        // iops = ios / (ms / 1000)
+        println!(
+            "Finished read phase in {}ms, {} ios, {} IOPS",
+            start.elapsed().as_millis(),
+            io_ops,
+            1000.0 * io_ops as f64 / (start.elapsed().as_millis() as f64)
+        );
+
         let mut meta_map = meta_map.write().unwrap();
 
+        start = std::time::Instant::now();
         write(io_handle_index, &map, &page_changes_rx, &mut meta_map);
+
+        let io_ops = IO_OPS.swap(0, Ordering::AcqRel);
+        println!(
+            "Finished write phase in {}ms, {} ios, {} IOPS",
+            start.elapsed().as_millis(),
+            io_ops,
+            1000.0 * io_ops as f64 / (start.elapsed().as_millis() as f64)
+        );
     }
 }
 
@@ -255,6 +286,7 @@ fn submit_write(
     command: IoCommand,
     completed: &mut usize,
 ) {
+    IO_OPS.fetch_add(1, Ordering::Relaxed);
     let mut command = Some(command);
     while let Some(c) = command.take() {
         match io_sender.try_send(c) {

@@ -3,7 +3,7 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 use rand::Rng;
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Barrier, RwLock};
+use std::sync::{atomic::Ordering, Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
@@ -274,7 +274,7 @@ fn handle_complete(
 
 // returns true if it's likely we can push another job to `in_flight`.
 fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index: usize) -> bool {
-    let pack_user_data = |job: usize, index: usize| (job as u64) << 32 + index as u64;
+    let pack_user_data = |job: usize, index: usize| ((job as u64) << 32) + index as u64;
 
     let job_head = match in_flight.front() {
         None => return true,
@@ -283,29 +283,25 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
 
     let mut can_submit = true;
 
-    'a: for (job_idx, batch) in in_flight.iter_mut().enumerate() {
+    'a: for batch in in_flight.iter_mut() {
         while let Some((i, probe)) = batch.next_pending() {
             let command = IoCommand {
                 kind: IoKind::Read(PageIndex::Data(probe.bucket), Box::new([0; PAGE_SIZE])),
                 handle: io_handle_index,
-                user_data: pack_user_data(job_idx - job_head, i),
+                user_data: pack_user_data(batch.job, i),
             };
 
-            // block on submitting if this is our next job.
-            if job_idx == job_head {
-                map.io_sender.send(command).expect("I/O worker dropped");
-            } else {
-                match map.io_sender.try_send(command) {
-                    Ok(()) => {
-                        *batch.state_mut(i) = PageState::Submitted { probe };
-                    }
-                    Err(TrySendError::Full(_)) => {
-                        can_submit = false;
-                        break 'a;
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        panic!("I/O worker dropped");
-                    }
+            match map.io_sender.try_send(command) {
+                Ok(()) => {
+                    super::IO_OPS.fetch_add(1, Ordering::Relaxed);
+                    *batch.state_mut(i) = PageState::Submitted { probe };
+                }
+                Err(TrySendError::Full(_)) => {
+                    can_submit = false;
+                    break 'a;
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    panic!("I/O worker dropped");
                 }
             }
         }

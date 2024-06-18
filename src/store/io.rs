@@ -183,6 +183,8 @@ fn submission_entry(command: &mut IoCommand, store: &Store, index: usize) -> squ
         .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
         .build()
         .user_data(index as u64),
-        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd())).build(),
+        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd()))
+            .build()
+            .user_data(index as u64),
     }
 }

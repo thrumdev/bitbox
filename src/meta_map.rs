@@ -56,7 +56,7 @@ impl MetaMap {
 
     // get the page index of a bucket in the meta-map.
     pub fn page_index(&self, bucket: usize) -> usize {
-        bucket - bucket % 4096
+        bucket / 4096
     }
 
     // get a page-sized slice of the metamap. This is guaranteed to have len 4096
