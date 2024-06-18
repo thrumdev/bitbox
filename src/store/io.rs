@@ -2,12 +2,14 @@ use super::{Page, Store, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
-use std::{os::fd::AsRawFd, sync::Arc};
+use std::{os::fd::AsRawFd, sync::{atomic::{AtomicU64, Ordering}, Arc}};
 
 const RING_CAPACITY: u32 = 64;
 
 // max number of inflight requests is bounded by the slab.
 const MAX_IN_FLIGHT: usize = 64;
+
+static IO_OPS: AtomicU64 = AtomicU64::new(0);
 
 pub type HandleIndex = usize;
 
@@ -54,6 +56,10 @@ pub struct IoCommand {
 pub struct CompleteIo {
     pub command: IoCommand,
     pub result: std::io::Result<()>,
+}
+
+pub fn total_io_ops() -> u64 {
+    IO_OPS.load(Ordering::Relaxed)
 }
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
@@ -154,6 +160,7 @@ fn run_worker(
                 pending_index,
             );
             unsafe { submit_queue.push(&entry).unwrap() };
+            IO_OPS.fetch_add(1, Ordering::Relaxed);
         }
 
         // 3. submit all together.

@@ -49,7 +49,7 @@ pub(crate) fn run_worker(
                     .map(|hash| {
                         let mut page_id = [0; 16];
                         page_id.copy_from_slice(&hash.as_bytes()[..16]);
-                        page_id[0] = worker_index as u8;
+                        page_id[15] = worker_index as u8;
                         page_id
                     })
             })
@@ -144,6 +144,8 @@ fn read_phase(
 
     let meta_map = meta_map.read().unwrap();
     let mut rng = rand::thread_rng();
+    let mut misprobes = 0;
+    let mut page_queries = params.workload_size * params.preload_count;
 
     // contains jobs we are actively waiting on I/O for.
     let mut in_flight: VecDeque<ReadJob> = VecDeque::with_capacity(MAX_IN_FLIGHT);
@@ -155,7 +157,9 @@ fn read_phase(
     loop {
         // handle complete I/O
         for complete_io in map.io_receiver.try_iter() {
-            handle_complete(complete_io, &mut in_flight, map, &*meta_map);
+            if handle_complete(complete_io, &mut in_flight, map, &*meta_map) {
+                misprobes += 1;
+            }
         }
 
         // submit requests from in-flight batches.
@@ -172,16 +176,17 @@ fn read_phase(
                 &workload,
             );
             if all_done {
+                println!("finished querying {page_queries} pages with {misprobes} misprobes");
                 break;
             }
         }
 
-        // block on completion if we can't make progress.
-        if in_flight.front().map_or(false, |s| s.waiting_on_io()) {
-            let complete_io = map.io_receiver.recv().expect("I/O worker dropped");
+        // // block on completion if we can't make progress.
+        // if in_flight.front().map_or(false, |s| s.waiting_on_io()) {
+        //     let complete_io = map.io_receiver.recv().expect("I/O worker dropped");
 
-            handle_complete(complete_io, &mut in_flight, map, &*meta_map);
-        }
+        //     handle_complete(complete_io, &mut in_flight, map, &*meta_map);
+        // }
 
         // process ready batches from the front.
         while in_flight.front().map_or(false, |state| state.all_ready()) {
@@ -191,6 +196,7 @@ fn read_phase(
             if item.pages.last().unwrap().1.is_unneeded()
                 && rng.gen::<f32>() < params.load_extra_rate
             {
+                page_queries += 1;
                 let page_id = item.page_id(params.preload_count);
 
                 // probe and set as pending.
@@ -233,7 +239,7 @@ fn handle_complete(
     in_flight: &mut VecDeque<ReadJob>,
     map: &Map,
     meta_map: &MetaMap,
-) {
+) -> bool {
     let unpack_user_data = |user_data: u64| {
         (
             (user_data >> 32) as usize,
@@ -255,6 +261,7 @@ fn handle_complete(
 
     // check that page idx matches the fetched page.
     let page = command.kind.unwrap_buf();
+    let mut misprobe = false;
     *job.state_mut(index_in_job) = if page_id_matches(&*page, &expected_id) {
         PageState::Received {
             location: Some(probe.bucket),
@@ -262,6 +269,7 @@ fn handle_complete(
         }
     } else {
         // probe failure. continue searching.
+        misprobe = true;
         match map.search(&meta_map, *probe) {
             None => PageState::Received {
                 location: None,
@@ -269,7 +277,10 @@ fn handle_complete(
             },
             Some(probe) => PageState::Pending { probe },
         }
-    }
+
+    };
+
+    misprobe
 }
 
 // returns true if it's likely we can push another job to `in_flight`.
@@ -293,7 +304,6 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
 
             match map.io_sender.try_send(command) {
                 Ok(()) => {
-                    super::IO_OPS.fetch_add(1, Ordering::Relaxed);
                     *batch.state_mut(i) = PageState::Submitted { probe };
                 }
                 Err(TrySendError::Full(_)) => {
