@@ -53,7 +53,7 @@ impl Store {
         let mut store_file = OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_DIRECT)
+            .custom_flags(libc::O_DIRECT | libc::O_ASYNC)
             .open(path)?;
 
         let mut meta_page_buf = Page::zeroed();
