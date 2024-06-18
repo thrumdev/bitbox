@@ -245,7 +245,7 @@ fn write(
             Some(b) => b,
             None => {
                 if !fresh_pages.insert(changed.page_id) {
-                    continue
+                    continue;
                 }
                 let probe = map.begin_probe(&changed.page_id, &*meta_map);
                 let bucket = map.search_free(&*meta_map, probe);

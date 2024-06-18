@@ -281,7 +281,6 @@ fn handle_complete(
             },
             Some(probe) => PageState::Pending { probe },
         }
-
     };
 
     misprobe

@@ -2,7 +2,13 @@ use super::{Page, Store, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use slab::Slab;
-use std::{os::fd::AsRawFd, sync::{atomic::{AtomicU64, Ordering}, Arc}};
+use std::{
+    os::fd::AsRawFd,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 const RING_CAPACITY: u32 = 64;
 
