@@ -63,9 +63,9 @@ pub fn start_io_worker(
     num_handles: usize,
 ) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
     // main bound is from the pending slab.
-    let (command_tx, command_rx) = crossbeam_channel::bounded(1);
+    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT);
     let (handle_txs, handle_rxs) = (0..num_handles)
-        .map(|_| crossbeam_channel::bounded(32))
+        .map(|_| crossbeam_channel::unbounded())
         .unzip();
     std::thread::spawn(move || run_worker(store, command_rx, handle_txs));
     (command_tx, handle_rxs)
