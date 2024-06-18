@@ -130,7 +130,7 @@ fn run_worker(
         // 2. accept new I/O requests when slab has space & submission queue is not full.
         let mut to_submit = false;
         while pending.len() < MAX_IN_FLIGHT && !submit_queue.is_full() {
-            let mut next_io = if pending.is_empty() {
+            let next_io = if pending.is_empty() {
                 // block on new I/O if nothing in-flight.
                 match command_rx.recv() {
                     Ok(command) => command,

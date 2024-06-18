@@ -19,17 +19,15 @@
 //! randomly updated at a rate of `page_item_update_rate`.
 
 use ahash::RandomState;
-use bitvec::prelude::*;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
-use rand::Rng;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::{Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
     io::{self as store_io, CompleteIo, IoCommand, IoKind, PageIndex},
-    Page, Store, PAGE_SIZE,
+    Page, Store,
 };
 
 mod read;
@@ -221,13 +219,7 @@ fn write(
         };
 
         submitted += 1;
-        submit_write(
-            io_handle_index,
-            &map.io_sender,
-            &map.io_receiver,
-            command,
-            &mut completed,
-        );
+        submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     }
 
     for changed_meta_page in changed_meta_pages {
@@ -240,13 +232,7 @@ fn write(
         };
 
         submitted += 1;
-        submit_write(
-            io_handle_index,
-            &map.io_sender,
-            &map.io_receiver,
-            command,
-            &mut completed,
-        );
+        submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     }
 
     while completed < submitted {
@@ -259,18 +245,11 @@ fn write(
         user_data: 0, // unimportant
     };
 
-    submit_write(
-        io_handle_index,
-        &map.io_sender,
-        &map.io_receiver,
-        command,
-        &mut completed,
-    );
+    submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     await_completion(&map.io_receiver, &mut completed);
 }
 
 fn submit_write(
-    io_handle_index: usize,
     io_sender: &Sender<IoCommand>,
     io_receiver: &Receiver<CompleteIo>,
     command: IoCommand,

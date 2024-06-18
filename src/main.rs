@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 mod meta_map;
 mod sim;
@@ -24,6 +25,20 @@ enum Command {
     Run {
         #[arg(short, long, value_name = "FILE")]
         file: PathBuf,
+        #[arg(long, default_value_t = 3)]
+        num_readers: usize,
+        #[arg(long)]
+        num_pages: usize,
+        #[arg(long)]
+        workload_size: usize,
+        #[arg(long, default_value_t = 0.0)]
+        cold_rate: f32,
+        #[arg(long, default_value_t = 3)]
+        preload_count: usize,
+        #[arg(long, default_value_t = 0.05)]
+        load_extra_rate: f32,
+        #[arg(long, default_value_t = 0.08)]
+        update_rate: f32,
     },
 }
 
@@ -37,14 +52,35 @@ fn main() {
                 let _ = std::fs::remove_file(file);
             }
         }
-        Command::Run { file } => {
-            let (_store, _meta_bytes) = match store::Store::open(file) {
+        Command::Run {
+            file,
+            num_readers,
+            num_pages,
+            workload_size,
+            cold_rate,
+            preload_count,
+            load_extra_rate,
+            update_rate,
+        } => {
+            let (store, meta_map) = match store::Store::open(file) {
                 Ok(x) => x,
                 Err(e) => {
                     println!("encountered error in opening store: {e:?}");
                     return;
                 }
             };
+
+            let sim_params = sim::Params {
+                num_workers: num_readers,
+                num_pages,
+                workload_size,
+                cold_rate,
+                preload_count,
+                load_extra_rate,
+                page_item_update_rate: update_rate,
+            };
+
+            sim::run_simulation(Arc::new(store), sim_params, meta_map);
         }
     }
 }

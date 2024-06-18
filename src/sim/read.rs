@@ -1,4 +1,3 @@
-use ahash::RandomState;
 use bitvec::prelude::*;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use rand::Rng;
@@ -8,8 +7,8 @@ use std::sync::{Arc, Barrier, RwLock};
 
 use crate::meta_map::MetaMap;
 use crate::store::{
-    io::{self as store_io, CompleteIo, IoCommand, IoKind, PageIndex},
-    Page, Store, PAGE_SIZE,
+    io::{CompleteIo, IoCommand, IoKind, PageIndex},
+    Page, PAGE_SIZE,
 };
 
 use super::{
