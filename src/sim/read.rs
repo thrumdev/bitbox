@@ -16,6 +16,37 @@ use super::{
     SLOTS_PER_PAGE,
 };
 
+fn make_workload(worker_index: usize, params: &Params) -> Vec<PageId> {
+    // create workload - (preload_count + 1) * workload_size random "page IDs"
+    (0..params.workload_size)
+        .flat_map(|_| {
+            let mut rng = rand::thread_rng();
+
+            // sample from typical range if not cold, out of range if cold
+            let range = if rng.gen::<f32>() < params.cold_rate {
+                params.num_pages..usize::max_value()
+            } else {
+                0..params.num_pages
+            };
+
+            // turn each sample into a random hash, set a unique byte per worker to discriminate.
+            (0..params.preload_count + 1)
+                .map(move |_| rand::thread_rng().gen_range(range.clone()))
+                .map(|sample| {
+                    // partition the page set across workers so it's the same regardless
+                    // of num workers with no overlaps.
+                    let sample = sample * params.num_workers + worker_index;
+                    blake3::hash(sample.to_le_bytes().as_slice())
+                })
+                .map(|hash| {
+                    let mut page_id = [0; 16];
+                    page_id.copy_from_slice(&hash.as_bytes()[..16]);
+                    page_id
+                })
+        })
+        .collect::<Vec<_>>()
+}
+
 pub(crate) fn run_worker(
     worker_index: usize,
     params: Params,
@@ -24,40 +55,12 @@ pub(crate) fn run_worker(
     changed_page_tx: Sender<ChangedPage>,
     start_work_rx: Receiver<Arc<Barrier>>,
 ) {
+    let mut workload_pages = make_workload(worker_index, &params);
     loop {
         let barrier = match start_work_rx.recv() {
             Err(_) => break,
             Ok(b) => b,
         };
-
-        // create workload - (preload_count + 1) * workload_size random "page IDs"
-        let workload_pages = (0..params.workload_size)
-            .flat_map(|_| {
-                let mut rng = rand::thread_rng();
-
-                // sample from typical range if not cold, out of range if cold
-                let range = if rng.gen::<f32>() < params.cold_rate {
-                    params.num_pages..usize::max_value()
-                } else {
-                    0..params.num_pages
-                };
-
-                // turn each sample into a random hash, set a unique byte per worker to discriminate.
-                (0..params.preload_count + 1)
-                    .map(move |_| rand::thread_rng().gen_range(range.clone()))
-                    .map(|sample| {
-                        // partition the page set across workers so it's the same regardless
-                        // of num workers with no overlaps.
-                        let sample = sample * params.num_workers + worker_index;
-                        blake3::hash(sample.to_le_bytes().as_slice())
-                    })
-                    .map(|hash| {
-                        let mut page_id = [0; 16];
-                        page_id.copy_from_slice(&hash.as_bytes()[..16]);
-                        page_id
-                    })
-            })
-            .collect::<Vec<_>>();
 
         // read
         read_phase(
@@ -70,6 +73,9 @@ pub(crate) fn run_worker(
         );
 
         let _ = barrier.wait();
+
+        // make next workload while write phase is ongoing.
+        workload_pages = make_workload(worker_index, &params);
     }
 }
 
@@ -99,6 +105,7 @@ impl PageState {
 struct ReadJob {
     pages: Vec<(PageId, PageState)>,
     job: usize,
+    has_pending: bool,
 }
 
 impl ReadJob {
@@ -111,7 +118,7 @@ impl ReadJob {
 
     fn waiting_on_io(&self) -> bool {
         self.pages.iter().any(|(_, state)| match state {
-            PageState::Submitted { .. } => true,
+            PageState::Submitted { .. } | PageState::Pending { .. } => true,
             _ => false,
         })
     }
@@ -144,7 +151,7 @@ fn read_phase(
     workload: Vec<PageId>,
     changed_page_tx: &Sender<ChangedPage>,
 ) {
-    const MAX_IN_FLIGHT: usize = 16;
+    const MAX_IN_FLIGHT: usize = 64;
 
     let meta_map = meta_map.read().unwrap();
     let mut rng = rand::thread_rng();
@@ -153,6 +160,7 @@ fn read_phase(
 
     // contains jobs we are actively waiting on I/O for.
     let mut in_flight: VecDeque<ReadJob> = VecDeque::with_capacity(MAX_IN_FLIGHT);
+    let mut buf_pool: Vec<Box<Page>> = (0..workload.len()).map(|_| Box::new(Page::zeroed())).collect::<Vec<_>>();
 
     // we process our workload sequentially but look forward and attempt to keep the I/O saturated.
     // this index tracks the index of the job at the front of the in_flight queue, or a new unique
@@ -161,18 +169,19 @@ fn read_phase(
     loop {
         // handle complete I/O
         for complete_io in map.io_receiver.try_iter() {
-            if handle_complete(complete_io, &mut in_flight, map, &*meta_map) {
+            if handle_complete(complete_io, &mut in_flight, &mut buf_pool, map, &*meta_map) {
                 misprobes += 1;
             }
         }
 
         // submit requests from in-flight batches.
-        let can_add_inflight = submit_pending(&mut in_flight, map, io_handle_index);
+        let can_add_inflight = submit_pending(&mut in_flight, &mut buf_pool, map, io_handle_index);
 
         // if submit queue appears to have space, add to our in-flight set.
         if can_add_inflight && in_flight.len() < MAX_IN_FLIGHT {
             let all_done = add_inflight(
                 &mut in_flight,
+                &mut buf_pool,
                 job_head,
                 &params,
                 map,
@@ -180,7 +189,6 @@ fn read_phase(
                 &workload,
             );
             if all_done {
-                println!("finished querying {page_queries} pages with {misprobes} misprobes");
                 break;
             }
         }
@@ -201,9 +209,12 @@ fn read_phase(
                 *item.state_mut(params.preload_count) = match map.search(&meta_map, probe) {
                     None => PageState::Received {
                         location: None,
-                        page: Box::new(Page::zeroed()),
+                        page: buf_pool.pop().unwrap(),
                     },
-                    Some(probe) => PageState::Pending { probe },
+                    Some(probe) => {
+                        item.has_pending = true;
+                        PageState::Pending { probe }
+                    }
                 };
                 in_flight.push_front(item);
                 break;
@@ -234,6 +245,7 @@ fn read_phase(
 fn handle_complete(
     complete_io: CompleteIo,
     in_flight: &mut VecDeque<ReadJob>,
+    buf_pool: &mut Vec<Box<Page>>,
     map: &Map,
     meta_map: &MetaMap,
 ) -> bool {
@@ -270,17 +282,26 @@ fn handle_complete(
         match map.search(&meta_map, *probe) {
             None => PageState::Received {
                 location: None,
-                page: Box::new(Page::zeroed()),
+                page: buf_pool.pop().unwrap(),
             },
-            Some(probe) => PageState::Pending { probe },
+            Some(probe) => {
+                job.has_pending = true;
+                buf_pool.push(page);
+                PageState::Pending { probe }
+            }
         }
     };
 
     misprobe
 }
 
-// returns true if it's likely we can push another job to `in_flight`.
-fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index: usize) -> bool {
+// returns true if we succeeded in submitting I/O and failed and false otherwise.
+fn submit_pending(
+    in_flight: &mut VecDeque<ReadJob>, 
+    buf_pool: &mut Vec<Box<Page>>,
+    map: &Map, 
+    io_handle_index: usize,
+) -> bool {
     let pack_user_data = |job: usize, index: usize| ((job as u64) << 32) + index as u64;
 
     let job_head = match in_flight.front() {
@@ -288,12 +309,15 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
         Some(j) => j.job,
     };
 
-    let mut can_submit = true;
+    let mut can_submit = false;
 
     'a: for batch in in_flight.iter_mut() {
+        if !batch.has_pending { continue }
         while let Some((i, probe)) = batch.next_pending() {
+            can_submit = true;
+            let buf = buf_pool.pop().unwrap();
             let command = IoCommand {
-                kind: IoKind::Read(PageIndex::Data(probe.bucket), Box::new(Page::zeroed())),
+                kind: IoKind::Read(PageIndex::Data(probe.bucket), buf),
                 handle: io_handle_index,
                 user_data: pack_user_data(batch.job, i),
             };
@@ -302,7 +326,8 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
                 Ok(()) => {
                     *batch.state_mut(i) = PageState::Submitted { probe };
                 }
-                Err(TrySendError::Full(_)) => {
+                Err(TrySendError::Full(command)) => {
+                    buf_pool.push(command.kind.unwrap_buf());
                     can_submit = false;
                     break 'a;
                 }
@@ -311,6 +336,7 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
                 }
             }
         }
+        batch.has_pending = false;
     }
 
     can_submit
@@ -319,6 +345,7 @@ fn submit_pending(in_flight: &mut VecDeque<ReadJob>, map: &Map, io_handle_index:
 // returns true if all work is done.
 fn add_inflight(
     in_flight: &mut VecDeque<ReadJob>,
+    buf_pool: &mut Vec<Box<Page>>,
     job_head: usize,
     params: &Params,
     map: &Map,
@@ -347,7 +374,7 @@ fn add_inflight(
                 let state = match map.search(&meta_map, probe) {
                     None => PageState::Received {
                         location: None,
-                        page: Box::new(Page::zeroed()),
+                        page: buf_pool.pop().unwrap(),
                     },
                     Some(probe) => PageState::Pending { probe },
                 };
@@ -356,6 +383,7 @@ fn add_inflight(
             })
             .collect(),
         job: job_idx,
+        has_pending: true,
     });
 
     false
