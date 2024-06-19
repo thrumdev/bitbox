@@ -236,6 +236,10 @@ impl Stats {
             elapsed.as_millis(),
         );
         println!("  estimated-QD={}", (arrival_rate * average_inflight / 1_000_000.0) as usize);
+
+        self.completions = 0;
+        self.arrivals = 0;
+        self.total_inflight_us = 0;
     }
 }
 

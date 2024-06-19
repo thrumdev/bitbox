@@ -88,7 +88,7 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
     println!("loaded map with {} buckets occupied", full_count);
     let meta_map = Arc::new(RwLock::new(meta_map));
     let (io_sender, mut io_receivers) =
-        store_io::start_io_worker(store.clone(), params.num_workers + 1);
+        store_io::start_fake_io_worker(store.clone(), params.num_workers + 1);
     let (page_changes_tx, page_changes_rx) = crossbeam_channel::unbounded();
 
     let write_io_receiver = io_receivers.pop().unwrap();
