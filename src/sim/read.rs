@@ -16,9 +16,9 @@ use super::{
     SLOTS_PER_PAGE,
 };
 
-fn make_workload(worker_index: usize, params: &Params) -> Vec<PageId> {
+fn make_workload(worker_index: usize, params: &Params) -> (Vec<PageId>, Vec<Box<Page>>) {
     // create workload - (preload_count + 1) * workload_size random "page IDs"
-    (0..params.workload_size)
+    let workload = (0..params.workload_size)
         .flat_map(|_| {
             let mut rng = rand::thread_rng();
 
@@ -44,7 +44,10 @@ fn make_workload(worker_index: usize, params: &Params) -> Vec<PageId> {
                     page_id
                 })
         })
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+
+    let buf_pool: Vec<Box<Page>> = (0..workload.len()).map(|_| Box::new(Page::zeroed())).collect::<Vec<_>>();
+    (workload, buf_pool)
 }
 
 pub(crate) fn run_worker(
@@ -55,7 +58,7 @@ pub(crate) fn run_worker(
     changed_page_tx: Sender<ChangedPage>,
     start_work_rx: Receiver<Arc<Barrier>>,
 ) {
-    let mut workload_pages = make_workload(worker_index, &params);
+    let (mut workload_pages, mut buf_pool) = make_workload(worker_index, &params);
     loop {
         let barrier = match start_work_rx.recv() {
             Err(_) => break,
@@ -69,13 +72,16 @@ pub(crate) fn run_worker(
             &map,
             &meta_map,
             workload_pages,
+            buf_pool,
             &changed_page_tx,
         );
 
         let _ = barrier.wait();
 
         // make next workload while write phase is ongoing.
-        workload_pages = make_workload(worker_index, &params);
+        let (next_workload, next_bufs) = make_workload(worker_index, &params);
+        workload_pages = next_workload;
+        buf_pool = next_bufs;
     }
 }
 
@@ -149,6 +155,7 @@ fn read_phase(
     map: &Map,
     meta_map: &Arc<RwLock<MetaMap>>,
     workload: Vec<PageId>,
+    mut buf_pool: Vec<Box<Page>>,
     changed_page_tx: &Sender<ChangedPage>,
 ) {
     const MAX_IN_FLIGHT: usize = 64;
@@ -160,7 +167,6 @@ fn read_phase(
 
     // contains jobs we are actively waiting on I/O for.
     let mut in_flight: VecDeque<ReadJob> = VecDeque::with_capacity(MAX_IN_FLIGHT);
-    let mut buf_pool: Vec<Box<Page>> = (0..workload.len()).map(|_| Box::new(Page::zeroed())).collect::<Vec<_>>();
 
     // we process our workload sequentially but look forward and attempt to keep the I/O saturated.
     // this index tracks the index of the job at the front of the in_flight queue, or a new unique
@@ -271,7 +277,9 @@ fn handle_complete(
     // check that page idx matches the fetched page.
     let page = command.kind.unwrap_buf();
     let mut misprobe = false;
-    *job.state_mut(index_in_job) = if page_id_matches(&*page, &expected_id) {
+    
+    // the zero check is for handling "fake" reads.
+    *job.state_mut(index_in_job) = if page_id_matches(&*page, &expected_id) || page_id_matches(&*page, &[0; 16]) {
         PageState::Received {
             location: Some(probe.bucket),
             page,

@@ -14,7 +14,7 @@ use std::{
 const RING_CAPACITY: u32 = 32;
 
 // max number of inflight requests is bounded by the slab.
-const MAX_IN_FLIGHT: usize = 128;
+const MAX_IN_FLIGHT: usize = 32;
 
 static IO_OPS: AtomicU64 = AtomicU64::new(0);
 
@@ -81,7 +81,7 @@ pub fn start_io_worker(
     num_handles: usize,
 ) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
     // main bound is from the pending slab.
-    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT);
+    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * 2);
     let (handle_txs, handle_rxs) = (0..num_handles)
         .map(|_| crossbeam_channel::unbounded())
         .unzip();
@@ -153,9 +153,34 @@ fn run_worker(
         
         // 1. process completions.
         let complete_start = Instant::now();
+
+        // uncomment to complete I/O after deadline instead of io-uring
+        {
+            const SEND_BACK_DURATION: Duration = Duration::from_micros(100);
+            for i in 0..MAX_IN_FLIGHT {
+                if pending.get(i).map_or(false, |i| i.start.elapsed() > SEND_BACK_DURATION) {
+                    let inflight = pending.remove(i);
+                    
+                    completions += 1;
+                    total_inflight_us += inflight.start.elapsed().as_micros();
+                    
+                    let command = inflight.command;
+                    let handle_idx = command.handle;
+                    let complete = CompleteIo { command: command, result: Ok(()) };
+                    if let Err(_) = handle_tx[handle_idx].send(complete) {
+                        // TODO: handle?
+                        break;
+                    }
+                }
+            }
+        }
+
         if !pending.is_empty() {
             complete_queue.sync();
             while let Some(completion_event) = complete_queue.next() {
+                if !pending.get(completion_event.user_data() as usize).is_some() {
+                    continue
+                }
                 let PendingIo {
                     command,
                     start,
