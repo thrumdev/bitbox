@@ -262,7 +262,7 @@ fn write(
         };
 
         submitted += 1;
-        //submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
+        submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     }
 
     for changed_meta_page in changed_meta_pages {
@@ -275,12 +275,12 @@ fn write(
         };
 
         submitted += 1;
-        //submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
+        submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
     }
 
-    // while completed < submitted {
-    //     await_completion(&map.io_receiver, &mut completed);
-    // }
+    while completed < submitted {
+        await_completion(&map.io_receiver, &mut completed);
+    }
 
     let command = IoCommand {
         kind: IoKind::Fsync,
