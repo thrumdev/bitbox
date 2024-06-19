@@ -280,9 +280,13 @@ fn handle_complete(
         // probe failure. continue searching.
         misprobe = true;
         match map.search(&meta_map, *probe) {
-            None => PageState::Received {
-                location: None,
-                page: buf_pool.pop().unwrap(),
+            None => {
+                let mut page = page;
+                *page = Page::zeroed();
+                PageState::Received {
+                    location: None,
+                    page,
+                }
             },
             Some(probe) => {
                 job.has_pending = true;
