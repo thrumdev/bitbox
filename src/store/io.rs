@@ -1,23 +1,18 @@
 use super::{Page, Store, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
-use rand::{Rng, prelude::SliceRandom};
+use rand::{prelude::SliceRandom, Rng};
 use slab::Slab;
 use std::{
     os::fd::AsRawFd,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-const RING_CAPACITY: u32 = 64;
+const RING_CAPACITY: u32 = 128;
 
 // max number of inflight requests is bounded by the slab.
 const MAX_IN_FLIGHT: usize = RING_CAPACITY as usize;
-
-static IO_OPS: AtomicU64 = AtomicU64::new(0);
 
 pub type HandleIndex = usize;
 
@@ -71,8 +66,12 @@ struct PendingIo {
     start: Instant,
 }
 
-pub fn total_io_ops() -> u64 {
-    IO_OPS.load(Ordering::Relaxed)
+#[derive(Clone, Copy)]
+pub enum Mode {
+    /// actually use io_uring
+    Real,
+    /// complete io_requests after a random latency.
+    Fake,
 }
 
 /// Create an I/O worker managing an io_uring and sending responses back via channels to a number
@@ -80,16 +79,29 @@ pub fn total_io_ops() -> u64 {
 pub fn start_io_worker(
     store: Arc<Store>,
     num_handles: usize,
+    mode: Mode,
 ) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
     // main bound is from the pending slab.
     let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * 2);
     let (handle_txs, handle_rxs) = (0..num_handles)
         .map(|_| crossbeam_channel::unbounded())
         .unzip();
-    let _ = std::thread::Builder::new()
-        .name("io_worker".to_string())
-        .spawn(move || run_worker(store, command_rx, handle_txs))
-        .unwrap();
+
+    match mode {
+        Mode::Real => {
+            let _ = std::thread::Builder::new()
+                .name("io_worker".to_string())
+                .spawn(move || run_worker(store, command_rx, handle_txs))
+                .unwrap();
+        }
+        Mode::Fake => {
+            let _ = std::thread::Builder::new()
+                .name("io_worker".to_string())
+                .spawn(move || run_fake_worker(command_rx, handle_txs))
+                .unwrap();
+        }
+    }
+
     (command_tx, handle_rxs)
 }
 
@@ -107,7 +119,7 @@ fn run_worker(
     let (submitter, mut submit_queue, mut complete_queue) = ring.split();
     let mut stats = Stats::new();
 
-    loop {   
+    loop {
         stats.log();
 
         // 1. process completions.
@@ -115,12 +127,10 @@ fn run_worker(
             complete_queue.sync();
             while let Some(completion_event) = complete_queue.next() {
                 if pending.get(completion_event.user_data() as usize).is_none() {
-                    continue
+                    continue;
                 }
-                let PendingIo {
-                    command,
-                    start,
-                } = pending.remove(completion_event.user_data() as usize);
+                let PendingIo { command, start } =
+                    pending.remove(completion_event.user_data() as usize);
 
                 stats.note_completion(start.elapsed().as_micros() as u64);
 
@@ -140,7 +150,6 @@ fn run_worker(
 
         // 2. accept new I/O requests when slab has space & submission queue is not full.
         let mut to_submit = false;
-        let mut ios = 0;
 
         submit_queue.sync();
         while pending.len() < MAX_IN_FLIGHT && !submit_queue.is_full() {
@@ -168,24 +177,19 @@ fn run_worker(
             let entry = submission_entry(
                 &mut pending.get_mut(pending_index).unwrap().command,
                 &*store,
-            ).user_data(pending_index as u64);
+            )
+            .user_data(pending_index as u64);
 
             // unwrap: known not full
             unsafe { submit_queue.push(&entry).unwrap() };
-            ios += 1;
         }
 
         // 3. submit all together.
         if to_submit {
-            IO_OPS.fetch_add(ios, Ordering::Relaxed);
             submit_queue.sync();
         }
 
-        let wait = if pending.len() == MAX_IN_FLIGHT {
-            1
-        } else {
-            0
-        };
+        let wait = if pending.len() == MAX_IN_FLIGHT { 1 } else { 0 };
 
         submitter.submit_and_wait(wait).unwrap();
     }
@@ -218,24 +222,28 @@ impl Stats {
     }
 
     fn log(&mut self) {
-        const LOG_DURATION: Duration = Duration::from_millis(400);
+        const LOG_DURATION: Duration = Duration::from_millis(1000);
 
         let elapsed = self.last_log.elapsed();
         if elapsed < LOG_DURATION {
-            return
+            return;
         }
 
         self.last_log = Instant::now();
         let arrival_rate = self.arrivals as f64 * 1000.0 / elapsed.as_millis() as f64;
         let average_inflight = self.total_inflight_us as f64 / self.completions as f64;
-        println!("arrivals={} (rate {}/s) completions={} avg_inflight={}us | {}ms",
+        println!(
+            "arrivals={} (rate {}/s) completions={} avg_inflight={}us | {}ms",
             self.arrivals,
             arrival_rate as usize,
             self.completions,
             average_inflight as usize,
             elapsed.as_millis(),
         );
-        println!("  estimated-QD={}", (arrival_rate * average_inflight / 1_000_000.0) as usize);
+        println!(
+            "  estimated-QD={:.1}",
+            arrival_rate * average_inflight / 1_000_000.0
+        );
 
         self.completions = 0;
         self.arrivals = 0;
@@ -259,27 +267,8 @@ fn submission_entry(command: &mut IoCommand, store: &Store) -> squeue::Entry {
         )
         .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
         .build(),
-        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd()))
-            .build(),
+        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd())).build(),
     }
-}
-
-/// Create a fake I/O worker receiving requests and completing them in a random order with a
-/// given deadline.
-pub fn start_fake_io_worker(
-    _store: Arc<Store>,
-    num_handles: usize,
-) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
-    // main bound is from the pending slab.
-    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT * 2);
-    let (handle_txs, handle_rxs) = (0..num_handles)
-        .map(|_| crossbeam_channel::unbounded())
-        .unzip();
-    let _ = std::thread::Builder::new()
-        .name("io_worker".to_string())
-        .spawn(move || run_fake_worker(command_rx, handle_txs))
-        .unwrap();
-    (command_tx, handle_rxs)
 }
 
 struct FakePendingIo {
@@ -289,13 +278,13 @@ struct FakePendingIo {
 }
 
 fn possible_latencies(latency_occurrences: Vec<(u64, usize)>) -> Vec<u64> {
-    latency_occurrences.into_iter().flat_map(|(l, x)| std::iter::repeat(l).take(x)).collect()
+    latency_occurrences
+        .into_iter()
+        .flat_map(|(l, x)| std::iter::repeat(l).take(x))
+        .collect()
 }
 
-fn run_fake_worker(
-    command_rx: Receiver<IoCommand>,
-    handle_tx: Vec<Sender<CompleteIo>>,
-) {
+fn run_fake_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>>) {
     // EV = ~319us with this distribution.
     let possible_latencies = possible_latencies(vec![
         (50, 1),
@@ -325,7 +314,10 @@ fn run_fake_worker(
 
                 let command = item.command;
                 let handle_idx = command.handle;
-                let complete = CompleteIo { command, result: Ok(()) };
+                let complete = CompleteIo {
+                    command,
+                    result: Ok(()),
+                };
                 if let Err(_) = handle_tx[handle_idx].send(complete) {
                     // TODO: handle?
                     break;
@@ -333,7 +325,9 @@ fn run_fake_worker(
             }
         }
 
-        if pending.len() == MAX_IN_FLIGHT { continue }
+        if pending.len() == MAX_IN_FLIGHT {
+            continue;
+        }
         let next_io = if pending.is_empty() {
             match command_rx.recv() {
                 Ok(io) => io,
