@@ -195,6 +195,7 @@ fn read_phase(
                 &workload,
             );
             if all_done {
+                println!("misprobes {misprobes}");
                 break;
             }
         }
@@ -278,8 +279,13 @@ fn handle_complete(
     let page = command.kind.unwrap_buf();
     let mut misprobe = false;
     
-    // the zero check is for handling "fake" reads.
-    *job.state_mut(index_in_job) = if page_id_matches(&*page, &expected_id) || page_id_matches(&*page, &[0; 16]) {
+    *job.state_mut(index_in_job) = if page_id_matches(&*page, &expected_id) {
+        PageState::Received {
+            location: Some(probe.bucket),
+            page,
+        }
+    } else if page_id_matches(&*page, &[0; 16]) {
+        // the zero check is for handling "fake" io.
         PageState::Received {
             location: Some(probe.bucket),
             page,
@@ -403,9 +409,7 @@ fn add_inflight(
 
 fn update_page(page: &mut Page, page_id: PageId, params: &Params, fresh: bool) -> PageDiff {
     let mut diff = [0u8; 16];
-    if fresh {
-        page[..page_id.len()].copy_from_slice(page_id.as_slice());
-    }
+    page[..page_id.len()].copy_from_slice(page_id.as_slice());
 
     let mut rng = rand::thread_rng();
 
