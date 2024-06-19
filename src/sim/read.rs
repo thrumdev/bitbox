@@ -282,7 +282,7 @@ fn handle_complete(
         match map.search(&meta_map, *probe) {
             None => PageState::Received {
                 location: None,
-                page: buf_pool.pop().unwrap(),
+                page,
             },
             Some(probe) => {
                 job.has_pending = true;

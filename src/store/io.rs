@@ -81,15 +81,39 @@ pub fn start_io_worker(
     num_handles: usize,
 ) -> (Sender<IoCommand>, Vec<Receiver<CompleteIo>>) {
     // main bound is from the pending slab.
-    let (command_tx, command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT);
-    let (handle_txs, handle_rxs) = (0..num_handles)
+    let (global_command_tx, global_command_rx) = crossbeam_channel::bounded(MAX_IN_FLIGHT);
+    let (handle_txs, handle_rxs): (Vec<Sender<CompleteIo>>, Vec<Receiver<CompleteIo>>) = (0
+        ..num_handles)
         .map(|_| crossbeam_channel::unbounded())
         .unzip();
+
     let _ = std::thread::Builder::new()
-        .name("io_worker".to_string())
-        .spawn(move || run_worker(store, command_rx, handle_txs))
+        .name("io_ingress".to_string())
+        .spawn(move || {
+            let mut command_txs = vec![];
+            for _ in 0..4 {
+                let store = store.clone();
+                let handle_txs = handle_txs.clone();
+                let (command_tx, command_rx) = crossbeam_channel::unbounded();
+                let _ = std::thread::Builder::new()
+                    .name("io_worker".to_string())
+                    .spawn(move || run_worker(store, command_rx, handle_txs))
+                    .unwrap();
+                command_txs.push(command_tx);
+            }
+            let mut i = 0;
+            loop {
+                match global_command_rx.recv() {
+                    Ok(m) => {
+                        let _ = command_txs[i].send(m);
+                        i = (i + 1) % command_txs.len();
+                    }
+                    Err(_) => break, // TODO: handle
+                }
+            }
+        })
         .unwrap();
-    (command_tx, handle_rxs)
+    (global_command_tx, handle_rxs)
 }
 
 fn run_worker(
@@ -105,7 +129,7 @@ fn run_worker(
 
     let (submitter, mut submit_queue, mut complete_queue) = ring.split();
 
-    const LOG_DURATION: Duration = Duration::from_millis(200);
+    const LOG_DURATION: Duration = Duration::from_millis(1000);
 
     let mut iter = 0;
     let mut last_log = Instant::now();
@@ -117,26 +141,31 @@ fn run_worker(
     let mut arrivals = 0;
     let mut empty_count = 0;
     let mut full_count = 0;
-    loop {   
+    loop {
         let elapsed = last_log.elapsed();
         if elapsed > LOG_DURATION {
             last_log = Instant::now();
             let arrival_rate = arrivals as f64 * 1000.0 / elapsed.as_millis() as f64;
             let average_inflight = total_inflight_us as f64 / completions as f64;
             println!("full={full_count} empty={empty_count} iterations of {iter}");
-            println!("syscall_time={}ns completion_time={}ns submit_time={}ns", 
+            println!(
+                "syscall_time={}ns completion_time={}ns submit_time={}ns",
                 (total_syscall_ns as f64 / iter as f64) as usize,
                 (total_complete_ns as f64 / iter as f64) as usize,
                 (total_submit_ns as f64 / iter as f64) as usize,
             );
-            println!("arrivals={} (rate {}/s) completions={} avg_inflight={}us | {}ms",
+            println!(
+                "arrivals={} (rate {}/s) completions={} avg_inflight={}us | {}ms",
                 arrivals,
                 arrival_rate as usize,
                 completions,
                 average_inflight as usize,
                 elapsed.as_millis(),
             );
-            println!("  estimated-QD={}", (arrival_rate * average_inflight / 1_000_000.0) as usize);
+            println!(
+                "  estimated-QD={}",
+                (arrival_rate * average_inflight / 1_000_000.0) as usize
+            );
 
             total_inflight_us = 0;
             total_syscall_ns = 0;
@@ -150,16 +179,14 @@ fn run_worker(
         }
 
         iter += 1;
-        
+
         // 1. process completions.
         let complete_start = Instant::now();
         if !pending.is_empty() {
             complete_queue.sync();
             while let Some(completion_event) = complete_queue.next() {
-                let PendingIo {
-                    command,
-                    start,
-                } = pending.remove(completion_event.user_data() as usize);
+                let PendingIo { command, start } =
+                    pending.remove(completion_event.user_data() as usize);
 
                 total_inflight_us += start.elapsed().as_micros();
                 completions += 1;
@@ -170,7 +197,10 @@ fn run_worker(
                 } else {
                     Ok(())
                 };
-                let complete = CompleteIo { command, result: Ok(()) };
+                let complete = CompleteIo {
+                    command,
+                    result: Ok(()),
+                };
                 if let Err(_) = handle_tx[handle_idx].send(complete) {
                     // TODO: handle?
                     break;
@@ -227,7 +257,8 @@ fn run_worker(
             let entry = submission_entry(
                 &mut pending.get_mut(pending_index).unwrap().command,
                 &*store,
-            ).user_data(pending_index as u64);
+            )
+            .user_data(pending_index as u64);
 
             // unwrap: known not full
             unsafe { submit_queue.push(&entry).unwrap() };
@@ -242,11 +273,7 @@ fn run_worker(
 
         total_submit_ns += submit_start.elapsed().as_nanos();
 
-        let wait = if pending.len() == MAX_IN_FLIGHT {
-            1
-        } else {
-            0
-        };
+        let wait = if pending.len() == MAX_IN_FLIGHT { 1 } else { 0 };
 
         let syscall_start = Instant::now();
         submitter.submit_and_wait(wait).unwrap();
@@ -270,7 +297,6 @@ fn submission_entry(command: &mut IoCommand, store: &Store) -> squeue::Entry {
         )
         .offset(page_index.index_in_store(store) * PAGE_SIZE as u64)
         .build(),
-        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd()))
-            .build(),
+        IoKind::Fsync => opcode::Fsync::new(types::Fd(store.store_file.as_raw_fd())).build(),
     }
 }
