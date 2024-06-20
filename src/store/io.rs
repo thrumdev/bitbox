@@ -152,6 +152,7 @@ fn run_worker(
         let mut to_submit = false;
 
         submit_queue.sync();
+
         while pending.len() < MAX_IN_FLIGHT && !submit_queue.is_full() {
             let next_io = if pending.is_empty() {
                 // block on new I/O if nothing in-flight.
@@ -222,7 +223,7 @@ impl Stats {
     }
 
     fn log(&mut self) {
-        const LOG_DURATION: Duration = Duration::from_millis(1000);
+        const LOG_DURATION: Duration = Duration::from_millis(500);
 
         let elapsed = self.last_log.elapsed();
         if elapsed < LOG_DURATION {

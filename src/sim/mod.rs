@@ -30,7 +30,10 @@ use crate::store::{
     Page, Store,
 };
 
+use self::wal::{Batch, Wal};
+
 mod read;
+mod wal;
 
 #[derive(Clone, Copy)]
 pub struct Params {
@@ -81,6 +84,10 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
     params.num_pages /= params.num_workers;
     params.workload_size /= params.num_workers;
 
+    let mut wal = Wal::open("wal".into()).unwrap();
+
+    // check storage integrity and apply last batch if necessary
+
     let mut full_count = meta_map.full_count();
     println!("loaded map with {} buckets occupied", full_count);
     let meta_map = Arc::new(RwLock::new(meta_map));
@@ -128,6 +135,7 @@ pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) 
         let mut meta_map = meta_map.write().unwrap();
         write(
             io_handle_index,
+            &mut wal,
             &map,
             &page_changes_rx,
             &mut meta_map,
@@ -202,6 +210,7 @@ impl Map {
 
 fn write(
     io_handle_index: usize,
+    wal: &mut Wal,
     map: &Map,
     changed_pages: &Receiver<ChangedPage>,
     meta_map: &mut MetaMap,
@@ -212,8 +221,8 @@ fn write(
 
     let start = std::time::Instant::now();
 
-    let mut submitted = 0;
-    let mut completed = 0;
+    let mut batch = Batch::new();
+
     for changed in changed_pages.try_iter() {
         let bucket = match changed.bucket {
             Some(b) => b,
@@ -229,47 +238,21 @@ fn write(
             }
         };
 
-        let command = IoCommand {
-            kind: IoKind::Write(PageIndex::Data(bucket), changed.buf),
-            handle: io_handle_index,
-            user_data: 0, // unimportant.
-        };
-
-        submitted += 1;
-
-        submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
+        batch.pages.push((bucket, changed.buf));
     }
 
     for changed_meta_page in changed_meta_pages {
         let mut buf = Box::new(Page::zeroed());
         buf[..].copy_from_slice(meta_map.page_slice(changed_meta_page));
-        let command = IoCommand {
-            kind: IoKind::Write(PageIndex::MetaBytes(changed_meta_page as u64), buf),
-            handle: io_handle_index,
-            user_data: 0, // unimportant
-        };
 
-        submitted += 1;
-
-        submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
+        batch.meta_pages.push((changed_meta_page as u64, buf));
     }
 
-    while completed < submitted {
-        await_completion(&map.io_receiver, &mut completed);
-    }
+    // apply the batch to the WAL and wait for fsync
+    wal.apply_batch(batch).unwrap();
 
-    let command = IoCommand {
-        kind: IoKind::Fsync,
-        handle: io_handle_index,
-        user_data: 0, // unimportant
-    };
-
-    submit_write(&map.io_sender, &map.io_receiver, command, &mut completed);
-
-    submitted += 1;
-    while completed < submitted {
-        await_completion(&map.io_receiver, &mut completed);
-    }
+    // apply the last batch to the storage and wait for fsync
+    let completed = wal.store_last_batch(io_handle_index, &map.io_sender, &map.io_receiver);
 
     *full_count += fresh_pages.len();
 
