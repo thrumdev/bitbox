@@ -31,6 +31,7 @@ use crate::store::{
 };
 
 mod read;
+mod wal;
 
 #[derive(Clone, Copy)]
 pub struct Params {
