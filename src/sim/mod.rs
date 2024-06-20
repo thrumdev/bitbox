@@ -33,6 +33,7 @@ use crate::store::{
 use crate::wal::{Batch as WalBatch, Entry as WalEntry, Wal};
 
 mod read;
+mod wal;
 
 #[derive(Clone, Copy)]
 pub struct Params {
