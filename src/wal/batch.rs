@@ -28,9 +28,9 @@ impl Batch {
     }
 
     // Create a Batch given a set of record, it expect all of them
-    // to have the same sequence_nuber and it keeps the order of entries
+    // to have the same sequence_number and it keeps the order of entries
     //
-    // panics if records is empty or one of the record has a different sequence_number
+    // panics if records is empty or one of the records has a different sequence_number
     pub fn from_records(records: Vec<Record>) -> Self {
         let sequence_number = records[0].sequence_number();
 

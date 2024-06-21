@@ -1,5 +1,3 @@
-use crate::wal::batch::Batch;
-
 use anyhow::bail;
 
 use std::{
@@ -11,6 +9,8 @@ use std::{
 mod batch;
 mod entry;
 mod record;
+
+pub use crate::wal::{batch::Batch, entry::Entry};
 
 // WAL format:
 //
@@ -91,7 +91,7 @@ impl Wal {
     }
 
     // apply a batch of changes to the WAL file. returns only after FSYNC has completed.
-    pub fn apply_batch(&mut self, batch: Batch) -> anyhow::Result<()> {
+    pub fn apply_batch(&mut self, batch: &Batch) -> anyhow::Result<()> {
         let records: Vec<_> = batch.to_records();
 
         for record in records {
