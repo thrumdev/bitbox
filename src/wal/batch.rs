@@ -51,13 +51,13 @@ impl Batch {
     }
 
     pub fn to_records(&self) -> Vec<Record> {
-        let mut records_data = vec![vec![]];
+        let mut records = vec![];
         let mut curr_record_data = vec![];
         let mut curr_record_size = Record::size_without_data();
 
         for entry in self.data.iter() {
             if curr_record_size + entry.len() > WAL_RECORD_SIZE {
-                records_data.push(curr_record_data);
+                records.push((curr_record_data, false));
                 curr_record_data = vec![];
                 curr_record_size = Record::size_without_data();
             }
@@ -66,12 +66,14 @@ impl Batch {
         }
 
         if !curr_record_data.is_empty() {
-            records_data.push(curr_record_data);
+            records.push((curr_record_data, true));
+        } else if let Some((_data, ref mut last)) = records.last_mut() {
+            *last = true;
         }
 
-        records_data
+        records
             .into_iter()
-            .map(|record_data| Record::new(self.sequence_number, record_data))
+            .map(|(record_data, last)| Record::new(self.sequence_number, last, record_data))
             .collect()
     }
 }

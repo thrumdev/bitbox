@@ -20,7 +20,7 @@ pub enum Entry {
 impl Entry {
     fn id(&self) -> u8 {
         match self {
-            Entry::Update { changed, .. } => 1,
+            Entry::Update { .. } => 1,
             Entry::Clear { .. } => 0,
         }
     }
