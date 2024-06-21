@@ -29,9 +29,9 @@ use crate::store::{
     io::{self as store_io, CompleteIo, IoCommand, IoKind, Mode as IoMode},
     Page, Store,
 };
+use crate::wal::Wal;
 
 mod read;
-mod wal;
 
 #[derive(Clone, Copy)]
 pub struct Params {
@@ -45,8 +45,8 @@ pub struct Params {
     pub page_item_update_rate: f32,
 }
 
-type PageId = [u8; 16];
-type PageDiff = [u8; 16];
+pub type PageId = [u8; 16];
+pub type PageDiff = [u8; 16];
 
 struct ChangedPage {
     page_id: PageId,
@@ -78,7 +78,7 @@ fn make_hasher(seed: [u8; 32]) -> RandomState {
     )
 }
 
-pub fn run_simulation(store: Arc<Store>, mut params: Params, meta_map: MetaMap) {
+pub fn run_simulation(store: Arc<Store>, mut wal: Wal, mut params: Params, meta_map: MetaMap) {
     params.num_pages /= params.num_workers;
     params.workload_size /= params.num_workers;
 
@@ -223,6 +223,9 @@ fn write(
     meta_map: &mut MetaMap,
     full_count: &mut usize,
 ) {
+    // TODO: Prepare a Batch, write it to the wal
+    // then apply the last batch to storage
+
     let mut changed_meta_pages = HashSet::new();
     let mut fresh_pages = HashSet::new();
 
@@ -302,7 +305,8 @@ fn write(
     );
 }
 
-fn submit_write(
+// TODO: move in crate::store::io
+pub fn submit_write(
     io_sender: &Sender<IoCommand>,
     io_receiver: &Receiver<CompleteIo>,
     command: IoCommand,
@@ -322,7 +326,8 @@ fn submit_write(
     }
 }
 
-fn await_completion(io_receiver: &Receiver<CompleteIo>, completed: &mut usize) {
+// TODO: move in crate::store::io
+pub fn await_completion(io_receiver: &Receiver<CompleteIo>, completed: &mut usize) {
     let completion = io_receiver.recv().expect("I/O worker dropped");
     assert!(completion.result.is_ok());
     *completed += 1;

@@ -20,13 +20,15 @@ pub enum IoKind {
     Read(RawFd, u64, Box<Page>),
     Write(RawFd, u64, Box<Page>),
     Fsync(RawFd),
+    // offset, len
+    Fallocate(RawFd, u64, u64),
 }
 
 impl IoKind {
     pub fn unwrap_buf(self) -> Box<Page> {
         match self {
             IoKind::Read(_, _, buf) | IoKind::Write(_, _, buf) => buf,
-            IoKind::Fsync(_) => panic!("attempted to extract buf from fsync"),
+            _ => panic!("attempted to extract buf from fsync"),
         }
     }
 }
@@ -155,6 +157,7 @@ fn run_worker(command_rx: Receiver<IoCommand>, handle_tx: Vec<Sender<CompleteIo>
                     Ok(())
                 };
                 let complete = CompleteIo { command, result };
+
                 if let Err(_) = handle_tx[handle_idx].send(complete) {
                     // TODO: handle?
                     break;
@@ -275,6 +278,9 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .build()
         }
         IoKind::Fsync(fd) => opcode::Fsync::new(types::Fd(fd)).build(),
+        IoKind::Fallocate(fd, page_index, len) => opcode::Fallocate::new(types::Fd(fd), len)
+            .offset(page_index * PAGE_SIZE as u64)
+            .build(),
     }
 }
 
