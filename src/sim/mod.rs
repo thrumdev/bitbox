@@ -340,8 +340,7 @@ fn write(
     );
 }
 
-// TODO: move in crate::store::io
-pub fn submit_write(
+fn submit_write(
     io_sender: &Sender<IoCommand>,
     io_receiver: &Receiver<CompleteIo>,
     command: IoCommand,
@@ -361,8 +360,7 @@ pub fn submit_write(
     }
 }
 
-// TODO: move in crate::store::io
-pub fn await_completion(io_receiver: &Receiver<CompleteIo>, completed: &mut usize) {
+fn await_completion(io_receiver: &Receiver<CompleteIo>, completed: &mut usize) {
     let completion = io_receiver.recv().expect("I/O worker dropped");
     assert!(completion.result.is_ok());
     *completed += 1;
