@@ -33,7 +33,6 @@ use crate::store::{
 use crate::wal::{Batch as WalBatch, Entry as WalEntry, Wal};
 
 mod read;
-mod wal;
 
 #[derive(Clone, Copy)]
 pub struct Params {
@@ -341,7 +340,8 @@ fn write(
     );
 }
 
-fn submit_write(
+// TODO: move in crate::store::io
+pub fn submit_write(
     io_sender: &Sender<IoCommand>,
     io_receiver: &Receiver<CompleteIo>,
     command: IoCommand,
@@ -361,7 +361,8 @@ fn submit_write(
     }
 }
 
-fn await_completion(io_receiver: &Receiver<CompleteIo>, completed: &mut usize) {
+// TODO: move in crate::store::io
+pub fn await_completion(io_receiver: &Receiver<CompleteIo>, completed: &mut usize) {
     let completion = io_receiver.recv().expect("I/O worker dropped");
     assert!(completion.result.is_ok());
     *completed += 1;

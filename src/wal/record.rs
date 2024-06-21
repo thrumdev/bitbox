@@ -99,7 +99,6 @@ impl Record {
         let mut raw_record = [0u8; WAL_RECORD_SIZE];
         raw_record[0..8].copy_from_slice(&self.sequence_number.to_le_bytes());
         // skip checksum, fill later
-
         let entry_count: u16 = self
             .data
             .len()

@@ -20,6 +20,8 @@ pub enum IoKind {
     Read(RawFd, u64, Box<Page>),
     Write(RawFd, u64, Box<Page>),
     Fsync(RawFd),
+    // offset, len
+    Fallocate(RawFd, u64, u64),
 }
 
 impl IoKind {
@@ -276,6 +278,9 @@ fn submission_entry(command: &mut IoCommand) -> squeue::Entry {
                 .build()
         }
         IoKind::Fsync(fd) => opcode::Fsync::new(types::Fd(fd)).build(),
+        IoKind::Fallocate(fd, page_index, len) => opcode::Fallocate::new(types::Fd(fd), len)
+            .offset(page_index * PAGE_SIZE as u64)
+            .build(),
     }
 }
 
