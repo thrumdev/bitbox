@@ -7,11 +7,11 @@ use std::{
 
 use branch::BranchId;
 
+mod bbn;
 mod branch;
 mod btree;
 mod leaf;
 mod meta;
-mod bbn;
 
 pub struct Tree {
     inner: Arc<Mutex<Inner>>,
@@ -19,7 +19,7 @@ pub struct Tree {
 
 struct Inner {
     root: Option<BranchId>,
-    leaf_store: leaf::LeafStore,
+    leaf_store: leaf::store::LeafStore,
     branch_node_pool: branch::BranchNodePool,
     primary_staging: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     secondary_staging: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
