@@ -13,6 +13,9 @@ mod btree;
 mod leaf;
 mod meta;
 
+// TODO: change everywhere Vec<u8> to Key
+pub type Key = [u8; 32];
+
 pub struct Tree {
     inner: Arc<Mutex<Inner>>,
 }

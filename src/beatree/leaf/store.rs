@@ -1,5 +1,5 @@
 use crate::beatree::leaf::free_list::FreeList;
-use crate::beatree::leaf::{LeafPage, PageNumber};
+use crate::beatree::leaf::{node::LeafNode, PageNumber};
 use crate::io::{CompleteIo, IoCommand, IoKind};
 use crate::store::{Page, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -56,7 +56,7 @@ impl LeafStore {
     }
 
     /// Returns the leaf page with the specified page number.
-    pub fn query(&self, pn: PageNumber) -> LeafPage {
+    pub fn query(&self, pn: PageNumber) -> LeafNode {
         let page = Box::new(Page::zeroed());
 
         let mut command = Some(IoCommand {
@@ -83,7 +83,7 @@ impl LeafStore {
         assert!(completion.result.is_ok());
         let page = completion.command.kind.unwrap_buf();
 
-        LeafPage { inner: page }
+        LeafNode { inner: page }
     }
 
     // create a LeafStoreTx able to append and release leaves from the LeafStore
@@ -148,8 +148,8 @@ pub struct LeafStoreTx<'a> {
     max_page_number: PageNumber,
     free_list: &'a mut FreeList,
     released: Vec<PageNumber>,
-    to_allocate: Vec<(PageNumber, LeafPage)>,
-    exceeded: Vec<(PageNumber, LeafPage)>,
+    to_allocate: Vec<(PageNumber, LeafNode)>,
+    exceeded: Vec<(PageNumber, LeafNode)>,
 }
 
 struct LeafStoreTxOutput {
@@ -161,7 +161,7 @@ struct LeafStoreTxOutput {
 }
 
 impl<'a> LeafStoreTx<'a> {
-    pub fn allocate(&mut self, leaf_page: LeafPage) -> PageNumber {
+    pub fn allocate(&mut self, leaf_page: LeafNode) -> PageNumber {
         let leaf_pn = match self.free_list.pop() {
             Some(pn) => pn,
             None => {
