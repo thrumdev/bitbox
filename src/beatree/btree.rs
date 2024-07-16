@@ -3,12 +3,12 @@ use std::fs::File;
 
 use super::{
     branch::{self, BranchId},
-    leaf,
+    leaf, Key,
 };
 
 /// Lookup a key in the btree.
 pub fn lookup(
-    key: Vec<u8>,
+    key: Key,
     root: BranchId,
     branch_node_pool: &branch::BranchNodePool,
     leaf_store: &leaf::store::LeafStore,
@@ -22,7 +22,7 @@ pub fn lookup(
 /// The changeset is a list of key value pairs to be added or removed from the btree.
 pub fn update(
     commit_seqn: u32,
-    changeset: &[(Vec<u8>, Option<Vec<u8>>)],
+    changeset: &[(Key, Option<Vec<u8>>)],
     root: BranchId,
     bnp: &mut branch::BranchNodePool,
     leaf_store: &mut leaf::store::LeafStoreTx,
