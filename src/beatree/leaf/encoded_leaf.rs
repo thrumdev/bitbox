@@ -25,22 +25,26 @@
 
 use std::ops::Range;
 
+use anyhow::bail;
+
 use crate::{
-    beatree::Key,
+    beatree::{leaf::LeafInsertResult, Key},
     store::{Page, PAGE_SIZE},
 };
 
-pub struct LeafNode {
+pub struct EncodedLeaf {
     pub inner: Box<Page>,
 }
 
-#[derive(PartialEq, Debug)]
-pub enum LeafInsertResult {
-    Ok,
-    NoSpaceLeft,
-}
+impl EncodedLeaf {
+    pub fn try_from(page: Box<Page>) -> anyhow::Result<Self> {
+        let leaf = Self { inner: page };
+        if leaf.n() == 0 {
+            bail!("This is not an Encoded Leaf")
+        }
+        Ok(leaf)
+    }
 
-impl LeafNode {
     pub fn new(key: Key, value: Vec<u8>) -> Self {
         let mut leaf = Self {
             inner: Box::new(Page::zeroed()),
@@ -50,11 +54,15 @@ impl LeafNode {
         leaf
     }
 
+    pub fn page(self) -> Box<Page> {
+        self.inner
+    }
+
     pub fn n(&self) -> usize {
         u16::from_le_bytes(self.inner[0..2].try_into().unwrap()) as usize
     }
 
-    pub fn set_n(&mut self, n: u16) {
+    fn set_n(&mut self, n: u16) {
         self.inner[0..2].copy_from_slice(&n.to_le_bytes());
     }
 
@@ -320,7 +328,7 @@ mod tests {
     fn add_to_emtpy_leaf() {
         let key = [1; 32];
         let val = vec![5; 10];
-        let leaf = LeafNode::new(key, val.clone());
+        let leaf = EncodedLeaf::new(key, val.clone());
         assert_eq!(leaf.get(&[0; 32]), None);
         assert_eq!(leaf.get(&key), Some(&val[..]));
     }
@@ -329,7 +337,7 @@ mod tests {
     fn add_to_leaf() {
         let key = [0; 32];
         let val = vec![5; 10];
-        let mut leaf = LeafNode::new(key, val.clone());
+        let mut leaf = EncodedLeaf::new(key, val.clone());
 
         let ks = [3, 1, 2].map(|i| [i; 32]);
 
@@ -346,7 +354,7 @@ mod tests {
     fn update_to_bigger_leaf_value() {
         let key = [0; 32];
         let val = vec![5; 10];
-        let mut leaf = LeafNode::new(key, val.clone());
+        let mut leaf = EncodedLeaf::new(key, val.clone());
 
         let ks = [3, 1, 2].map(|i| [i; 32]);
 
@@ -370,7 +378,7 @@ mod tests {
     fn update_to_smaller_leaf_value() {
         let key = [0; 32];
         let val = vec![5; 10];
-        let mut leaf = LeafNode::new(key, val.clone());
+        let mut leaf = EncodedLeaf::new(key, val.clone());
 
         let ks = [3, 1, 2].map(|i| [i; 32]);
 
@@ -394,7 +402,7 @@ mod tests {
     fn remove_leaf_value() {
         let key = [0; 32];
         let val = vec![5; 10];
-        let mut leaf = LeafNode::new(key, val.clone());
+        let mut leaf = EncodedLeaf::new(key, val.clone());
 
         let ks = [3, 1, 2].map(|i| [i; 32]);
 
@@ -418,7 +426,7 @@ mod tests {
     fn insert_overflow_leaf() {
         let key = [0; 32];
         let val = vec![0; 1024];
-        let mut leaf = LeafNode::new(key, val.clone());
+        let mut leaf = EncodedLeaf::new(key, val.clone());
 
         assert_eq!(LeafInsertResult::Ok, leaf.insert([1; 32], vec![1; 1024]));
         assert_eq!(LeafInsertResult::Ok, leaf.insert([2; 32], vec![2; 1024]));

@@ -1,5 +1,5 @@
 use crate::beatree::leaf::free_list::FreeList;
-use crate::beatree::leaf::{node::LeafNode, PageNumber};
+use crate::beatree::leaf::{LeafNode, PageNumber};
 use crate::io::{CompleteIo, IoCommand, IoKind};
 use crate::store::{Page, PAGE_SIZE};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -83,7 +83,7 @@ impl LeafStore {
         assert!(completion.result.is_ok());
         let page = completion.command.kind.unwrap_buf();
 
-        LeafNode { inner: page }
+        LeafNode::new(pn, page)
     }
 
     // create a LeafStoreTx able to append and release leaves from the LeafStore
@@ -148,8 +148,8 @@ pub struct LeafStoreTx<'a> {
     max_page_number: PageNumber,
     free_list: &'a mut FreeList,
     released: Vec<PageNumber>,
-    to_allocate: Vec<(PageNumber, LeafNode)>,
-    exceeded: Vec<(PageNumber, LeafNode)>,
+    to_allocate: Vec<(PageNumber, Box<Page>)>,
+    exceeded: Vec<(PageNumber, Box<Page>)>,
 }
 
 struct LeafStoreTxOutput {
@@ -161,8 +161,8 @@ struct LeafStoreTxOutput {
 }
 
 impl<'a> LeafStoreTx<'a> {
-    pub fn allocate(&mut self, leaf_page: LeafNode) -> PageNumber {
-        let leaf_pn = match self.free_list.pop() {
+    pub fn allocate(&mut self, leaf_node: LeafNode) -> PageNumber {
+        let front_leaf_pn = match self.free_list.pop() {
             Some(pn) => pn,
             None => {
                 let pn = *self.nonce_page_number;
@@ -171,12 +171,25 @@ impl<'a> LeafStoreTx<'a> {
             }
         };
 
-        if leaf_pn.0 < self.max_page_number.0 {
-            self.to_allocate.push((leaf_pn, leaf_page));
-        } else {
-            self.exceeded.push((leaf_pn, leaf_page));
+        // a LeafNode will always occupy at least one page,
+        // if it is an oveflow then multiple pages will be allocated
+
+        for (i, page) in leaf_node.pages().into_iter().enumerate() {
+            let pn = if i == 0 {
+                front_leaf_pn
+            } else {
+                let pn = *self.nonce_page_number;
+                self.nonce_page_number.0 += 1;
+                pn
+            };
+
+            if pn.0 < self.max_page_number.0 {
+                self.to_allocate.push((pn, page));
+            } else {
+                self.exceeded.push((pn, page));
+            }
         }
-        leaf_pn
+        front_leaf_pn
     }
 
     pub fn release(&mut self, id: PageNumber) {
@@ -191,33 +204,13 @@ impl<'a> LeafStoreTx<'a> {
             self.max_page_number,
         );
 
-        let mut to_allocate = self
-            .to_allocate
-            .into_iter()
-            .map(|(pn, leaf_page)| (pn, leaf_page.inner))
-            .collect::<Vec<_>>();
-        to_allocate.extend(
-            free_list_output
-                .to_allocate
-                .into_iter()
-                .map(|(pn, free_list_page)| (pn, free_list_page.inner)),
-        );
+        self.to_allocate.extend(free_list_output.to_allocate);
 
-        let mut exceeded = self
-            .exceeded
-            .into_iter()
-            .map(|(pn, leaf_page)| (pn, leaf_page.inner))
-            .collect::<Vec<_>>();
-        exceeded.extend(
-            free_list_output
-                .exceeded
-                .into_iter()
-                .map(|(pn, free_list_page)| (pn, free_list_page.inner)),
-        );
+        self.exceeded.extend(free_list_output.exceeded);
 
         LeafStoreTxOutput {
-            to_allocate,
-            exceeded,
+            to_allocate: self.to_allocate,
+            exceeded: self.exceeded,
             // after appending to the free list, the head will always be present
             new_free_list_head: self.free_list.head_pn().unwrap(),
         }

@@ -1,4 +1,4 @@
-use crate::beatree::leaf::{FreeListPage, PageNumber};
+use crate::beatree::leaf::PageNumber;
 use crate::io::{self, CompleteIo, IoCommand, IoKind, Mode};
 use crate::store::{Page, PAGE_SIZE};
 
@@ -27,8 +27,8 @@ pub struct FreeList {
 // while `exceeded` are the ones that require the store
 // to be bigger to create space for the new required page numbers
 pub struct FreeListAppendOutput {
-    pub to_allocate: Vec<(PageNumber, FreeListPage)>,
-    pub exceeded: Vec<(PageNumber, FreeListPage)>,
+    pub to_allocate: Vec<(PageNumber, Box<Page>)>,
+    pub exceeded: Vec<(PageNumber, Box<Page>)>,
 }
 
 impl FreeList {
@@ -115,7 +115,7 @@ impl FreeList {
         pn: PageNumber,
         next_head_pns: &mut impl Iterator<Item = PageNumber>,
         force_new_head: bool,
-    ) -> Option<(PageNumber, FreeListPage)> {
+    ) -> Option<(PageNumber, Box<Page>)> {
         let mut encoded_head = None;
 
         // create new_head if required
@@ -226,7 +226,7 @@ impl FreeList {
 
 impl FreeListAppendOutput {
     pub fn create_output(
-        pages: Vec<(PageNumber, FreeListPage)>,
+        pages: Vec<(PageNumber, Box<Page>)>,
         max_nonce: PageNumber,
     ) -> FreeListAppendOutput {
         let mut pages_iter = pages.into_iter();
@@ -276,7 +276,7 @@ fn decode_free_list_page(page: Box<Page>) -> (PageNumber, Vec<PageNumber>) {
     (prev, free_list)
 }
 
-fn encode_free_list_page(prev: PageNumber, pns: &Vec<PageNumber>) -> FreeListPage {
+fn encode_free_list_page(prev: PageNumber, pns: &Vec<PageNumber>) -> Box<Page> {
     let mut page = Page::zeroed();
 
     page[0..4].copy_from_slice(&prev.0.to_le_bytes());
@@ -287,7 +287,5 @@ fn encode_free_list_page(prev: PageNumber, pns: &Vec<PageNumber>) -> FreeListPag
         page[start..start + 4].copy_from_slice(&pn.0.to_le_bytes());
     }
 
-    FreeListPage {
-        inner: Box::new(page),
-    }
+    Box::new(page)
 }
