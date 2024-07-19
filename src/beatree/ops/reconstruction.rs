@@ -42,10 +42,13 @@ fn read_bbns(
     for seq_chunk in read_sequential(bn_fd) {
         let nodes = seq_chunk.chunks(BRANCH_NODE_SIZE);
         for node in nodes {
-            // TODO: handle empty
-
             let view = branch::BranchNodeView::from_slice(node);
             if view.sync_seqn() > sync_seqn { continue }
+
+            // handle empty.
+            if view.n() == 0 && node == [0; BRANCH_NODE_SIZE] {
+                break
+            }
 
             if let Some((existing_sync_seqn, branch_meta_index)) = branch_seqns.get(&view.bbn_seqn()) {
                 if *existing_sync_seqn < view.sync_seqn() {
