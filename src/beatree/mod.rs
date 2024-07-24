@@ -1,7 +1,6 @@
 use allocator::PageNumber;
 use anyhow::{Context, Result};
 use branch::BRANCH_NODE_SIZE;
-use im::OrdMap;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -43,7 +42,7 @@ struct Shared {
     bbn_index: index::Index,
     leaf_store_rd: LeafStoreReader,
     branch_node_pool: branch::BranchNodePool,
-    staging: OrdMap<Key, Option<Vec<u8>>>,
+    staging: BTreeMap<Key, Option<Vec<u8>>>,
 }
 
 struct Sync {
@@ -55,6 +54,12 @@ struct Sync {
     meta_fd: RawFd,
     ln_fd: RawFd,
     bbn_fd: RawFd,
+}
+
+impl Shared {
+    fn take_staged_changeset(&mut self) -> BTreeMap<Key, Option<Vec<u8>>> {
+        mem::take(&mut self.staging)
+    }
 }
 
 impl Tree {
@@ -163,7 +168,7 @@ impl Tree {
             bbn_index: index,
             leaf_store_rd,
             branch_node_pool: bnp,
-            staging: OrdMap::new(),
+            staging: BTreeMap::new(),
         };
 
         let sync_io_handle_index = IO_IX_SYNC;
@@ -235,8 +240,8 @@ impl Tree {
         let mut bbn_index;
         let mut branch_node_pool;
         {
-            let inner = self.shared.lock().unwrap();
-            staged_changeset = inner.staging.clone();
+            let mut inner = self.shared.lock().unwrap();
+            staged_changeset = inner.take_staged_changeset();
             bbn_index = inner.bbn_index.clone();
             branch_node_pool = inner.branch_node_pool.clone();
         }
@@ -262,7 +267,7 @@ impl Tree {
             //   so things will be allocated and released following what is being performed
             //   on the branch_node_pool and commited later on onto disk
             ops::update(
-                staged_changeset.clone(),
+                staged_changeset,
                 &mut bbn_index,
                 &mut branch_node_pool,
                 &mut sync.leaf_store_wr,
@@ -322,7 +327,6 @@ impl Tree {
 
         // Take the shared lock again to complete the update to the new shared state
         let mut inner = self.shared.lock().unwrap();
-        inner.staging = inner.staging.clone().difference(staged_changeset);
         inner.bbn_index = bbn_index;
         for id in obsolete_branches {
             inner.branch_node_pool.release(id);
