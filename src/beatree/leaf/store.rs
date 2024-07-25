@@ -56,8 +56,14 @@ pub fn create(
 }
 
 impl LeafStoreReader {
-    /// Returns the leaf page with the specified page number.
-    pub fn query(&self, pn: PageNumber) -> LeafNode {
+    /// Begin fetching the Leaf under the specified page number
+    pub fn warm_up(&self, pn: PageNumber) {
+        self.allocator_reader.warm_up(pn)
+    }
+
+    /// Returns the leaf page allocated at the specified page number.
+    /// Requires calling `warm_up` before, otherwise the query will never finish.
+    pub fn query(&mut self, pn: PageNumber) -> LeafNode {
         let page = self.allocator_reader.query(pn);
 
         LeafNode { inner: page }

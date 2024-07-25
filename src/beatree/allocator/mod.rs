@@ -6,6 +6,7 @@ use crate::{
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use std::{
+    collections::HashMap,
     fs::File,
     os::{fd::AsRawFd, unix::fs::MetadataExt},
 };
@@ -13,7 +14,7 @@ use std::{
 mod free_list;
 
 /// The number of a page
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PageNumber(pub u32);
 
 impl PageNumber {
@@ -32,10 +33,10 @@ impl From<u32> for PageNumber {
 pub struct AllocatorReader {
     store_file: File,
     free_list_head: Option<PageNumber>,
-    bump: PageNumber,
     io_handle_index: usize,
     io_sender: Sender<IoCommand>,
     io_receiver: Receiver<CompleteIo>,
+    ready_queries: HashMap<PageNumber, Box<Page>>,
 }
 
 /// The AllocatorWriter enables dynamic allocation and release of Pages.
@@ -98,24 +99,24 @@ pub fn create(
     let reader = AllocatorReader {
         store_file: reader_fd,
         free_list_head,
-        bump,
         io_handle_index: rd_io_handle_index,
         io_sender: rd_io_sender,
         io_receiver: rd_io_receiver,
+        ready_queries: HashMap::new(),
     };
 
     (reader, writer)
 }
 
 impl AllocatorReader {
-    /// Returns the page with the specified page number.
-    pub fn query(&self, pn: PageNumber) -> Box<Page> {
+    /// Begin fetching the page under the specified page number
+    pub fn warm_up(&self, pn: PageNumber) {
         let page = Box::new(Page::zeroed());
 
         let mut command = Some(IoCommand {
             kind: IoKind::Read(self.store_file.as_raw_fd(), pn.0 as u64, page),
             handle: self.io_handle_index,
-            user_data: 0,
+            user_data: pn.0 as u64,
         });
 
         while let Some(c) = command.take() {
@@ -127,13 +128,39 @@ impl AllocatorReader {
                 }
             }
         }
+    }
 
-        // wait for completion
-        let completion = self.io_receiver.recv().expect("I/O store worker dropped");
-        assert!(completion.result.is_ok());
-        let page = completion.command.kind.unwrap_buf();
+    /// Returns the page allocated at the specified page number.
+    /// Requires calling `warm_up` before, otherwise the query will never finish.
+    pub fn query(&mut self, pn: PageNumber) -> Box<Page> {
+        // if ready, return early
+        if let Some(page) = self.ready_queries.remove(&pn) {
+            return page;
+        }
 
-        page
+        // loop until the required page is received, saving any received pages in the meantime
+        loop {
+            let Ok(CompleteIo {
+                command:
+                    IoCommand {
+                        kind: IoKind::Read(.., page),
+                        user_data,
+                        ..
+                    },
+                result,
+            }) = self.io_receiver.recv()
+            else {
+                panic!("I/O store worker dropped")
+            };
+
+            assert!(result.is_ok());
+
+            if user_data == pn.0 as u64 {
+                return page;
+            }
+
+            self.ready_queries.insert(pn, page);
+        }
     }
 
     pub fn free_list(&self) -> FreeList {
@@ -144,10 +171,6 @@ impl AllocatorReader {
             &self.io_receiver,
             self.free_list_head,
         )
-    }
-
-    pub fn bump(&self) -> PageNumber {
-        self.bump
     }
 }
 
